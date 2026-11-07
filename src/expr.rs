@@ -146,6 +146,24 @@ pub enum Expr {
     Cond(Box<Expr>, Box<Expr>, Box<Expr>),
 }
 
+/// User function from `.func name(args) {body}`.
+#[derive(Clone, Debug)]
+pub struct Func {
+    pub args: Vec<String>,
+    pub body: Expr,
+}
+
+pub type Funcs = std::collections::HashMap<String, Func>;
+
+/// Parse `name(a, b) {body}` (the text after `.func`; `=` before the body is optional).
+pub fn parse_func(s: &str) -> Result<(String, Func), String> {
+    let (name, r) = s.split_once('(').ok_or_else(|| format!(".func '{s}': expected name(args)"))?;
+    let (args, body) = r.split_once(')').ok_or_else(|| format!(".func '{s}': missing ')'"))?;
+    let args = args.split(',').map(|a| a.trim().to_ascii_lowercase()).filter(|a| !a.is_empty()).collect();
+    let body = body.trim().trim_start_matches('=').trim().trim_matches('\'');
+    Ok((name.trim().to_ascii_lowercase(), Func { args, body: Expr::parse(body)? }))
+}
+
 /// Values an expression may look up while evaluating.
 pub trait Env {
     fn x(&self, _i: usize) -> f64 {
@@ -245,6 +263,49 @@ impl Expr {
         }
     }
 
+    /// Rebuild with `f` applied to each direct child.
+    fn map(&self, f: &mut dyn FnMut(&Expr) -> Result<Expr, String>) -> Result<Expr, String> {
+        Ok(match self {
+            Expr::Neg(a) => Expr::Neg(Box::new(f(a)?)),
+            Expr::Not(a) => Expr::Not(Box::new(f(a)?)),
+            Expr::Bin(o, a, b) => Expr::Bin(*o, Box::new(f(a)?), Box::new(f(b)?)),
+            Expr::Cond(c, a, b) => Expr::Cond(Box::new(f(c)?), Box::new(f(a)?), Box::new(f(b)?)),
+            Expr::Call(n, a) => Expr::Call(n.clone(), a.iter().map(&mut *f).collect::<Result<_, _>>()?),
+            _ => self.clone(),
+        })
+    }
+
+    /// Expand calls of user `.func`s; their arguments shadow parameters.
+    pub fn inline(&self, funcs: &Funcs) -> Result<Expr, String> {
+        if funcs.is_empty() {
+            return Ok(self.clone());
+        }
+        self.inline_d(funcs, 0)
+    }
+
+    fn inline_d(&self, funcs: &Funcs, depth: usize) -> Result<Expr, String> {
+        if let Expr::Call(n, a) = self
+            && let Some(f) = funcs.get(n)
+        {
+            if depth > 64 {
+                return Err(format!("function '{n}' is recursive"));
+            }
+            if a.len() != f.args.len() {
+                return Err(format!("{n}() takes {} argument(s)", f.args.len()));
+            }
+            let a: Vec<Expr> = a.iter().map(|e| e.inline_d(funcs, depth)).collect::<Result<_, _>>()?;
+            return Ok(f.body.inline_d(funcs, depth + 1)?.subst(&f.args, &a));
+        }
+        self.map(&mut |e| e.inline_d(funcs, depth))
+    }
+
+    fn subst(&self, names: &[String], vals: &[Expr]) -> Expr {
+        match self {
+            Expr::Var(n) => names.iter().position(|a| a == n).map_or_else(|| self.clone(), |i| vals[i].clone()),
+            _ => self.map(&mut |e| Ok(e.subst(names, vals))).expect("subst cannot fail"),
+        }
+    }
+
     /// Visit every signal name.
     pub fn signals(&self, out: &mut Vec<String>) {
         match self {
@@ -328,6 +389,22 @@ fn call(f: &str, a: &[f64]) -> Result<f64, String> {
         "max" => (need(2)?, a[0].max(a[1])).1,
         "limit" => (need(3)?, a[0].clamp(a[1].min(a[2]), a[1].max(a[2]))).1,
         "if" => (need(3)?, if a[0] != 0.0 { a[1] } else { a[2] }).1,
+        // table(x, x1,y1, x2,y2, …): linear interpolation, held flat outside; x ascending
+        "table" => {
+            if n < 3 || n.is_multiple_of(2) {
+                return Err("table() takes x and (x, y) pairs".into());
+            }
+            let p: Vec<(f64, f64)> = a[1..].chunks(2).map(|c| (c[0], c[1])).collect();
+            let i = p.partition_point(|q| q.0 <= a[0]);
+            if i == 0 {
+                p[0].1
+            } else if i == p.len() {
+                p[i - 1].1
+            } else {
+                let ((x0, y0), (x1, y1)) = (p[i - 1], p[i]);
+                y0 + (y1 - y0) * (a[0] - x0) / (x1 - x0)
+            }
+        }
         // Monte Carlo (LTSpice): new random draw on every evaluation, i.e. every .step run
         "rand" => (need(1)?, rnd()).1,
         "flat" => (need(1)?, a[0] * (2.0 * rnd() - 1.0)).1,

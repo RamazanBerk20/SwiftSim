@@ -20,6 +20,10 @@ fn symbol(name: &str) -> Option<(Kind, &'static [P], P, bool)> {
         "pnp" => (Pnp, &[[4, 0], [0, 3], [4, 6]], [3, 3], false),
         "nmos" => (Nmos, &[[3, 0], [0, 5], [3, 6]], [2, 4], false),
         "pmos" => (Pmos, &[[3, 0], [0, 5], [3, 6]], [2, 4], false),
+        "nmos4" => (Nmos4, &[[3, 0], [0, 5], [3, 6], [3, 3]], [2, 3], false),
+        "pmos4" => (Pmos4, &[[3, 0], [0, 5], [3, 6], [3, 3]], [2, 3], false),
+        "njf" => (Njf, &[[3, 0], [0, 4], [3, 6]], [2, 4], false),
+        "pjf" => (Pjf, &[[3, 0], [0, 4], [3, 6]], [2, 4], false),
         "e" => (Vcvs, &[[0, 1], [0, 6], [-3, 2], [-3, 5]], [0, 3], false),
         // g's output pins run bottom-to-top; unflipped, the stubs would short them
         "g" => (Vccs, &[[0, 6], [0, 1], [-3, 2], [-3, 5]], [0, 3], true),
@@ -353,7 +357,7 @@ FLAG 1920 400 i1n
 
     #[test]
     fn every_symbol_and_orientation_keeps_pins_apart() {
-        for name in ["res", "ind", "cap", "diode", "voltage", "bv", "current", "npn", "pnp", "nmos", "pmos", "e", "g", "sw", "opamp"] {
+        for name in ["res", "ind", "cap", "diode", "voltage", "bv", "current", "npn", "pnp", "nmos", "pmos", "nmos4", "pmos4", "njf", "pjf", "e", "g", "sw", "opamp"] {
             let pins = symbol(name).unwrap().1;
             for o in ["R0", "R90", "R180", "R270", "M0", "M90", "M180", "M270"] {
                 let mut asc = format!("SYMBOL {name} 32 -48 {o}\n");
@@ -369,10 +373,46 @@ FLAG 1920 400 i1n
         }
     }
 
+    // pins flagged at the stock .asy positions: nmos4 B at (48,48), njf G at (0,64)
+    const FOUR_PIN: &str = "Version 4
+SYMBOL nmos4 0 0 R0
+SYMATTR InstName M1
+SYMATTR Value NMOS_GENERIC
+SYMATTR SpiceLine W=10u L=10u
+FLAG 48 0 d
+FLAG 0 80 g
+FLAG 48 96 0
+FLAG 48 48 b
+SYMBOL njf 200 0 R0
+SYMATTR InstName J1
+SYMATTR Value NJF
+FLAG 248 0 d
+FLAG 200 64 0
+FLAG 248 96 s
+TEXT 0 200 Left 2 !Vd d 0 5\\nVg g 0 2\\nVb b 0 -1\\nRs s 0 1k\\n.op
+";
+
+    #[test]
+    fn four_pin_mos_and_jfet() {
+        let l = lines(FOUR_PIN);
+        for want in ["M1 d g 0 b NMOS_GENERIC W=10u L=10u", "J1 d 0 s NJF"] {
+            assert!(l.iter().any(|x| x == want), "missing {want:?} in {l:#?}");
+        }
+        let n = import(FOUR_PIN).0.netlist();
+        let r = swiftsim::run_netlist(&n.text, None, &swiftsim::Control::default()).unwrap();
+        let p = &r.plots[0];
+        let v = |s: &str| p.re[p.index(s).unwrap()][0];
+        // body effect through the bulk pin: Vth = 0.7 + 0.4(√1.7 - √0.7), Id = β/2·Vov²·(1 + 0.04·5)
+        let vov = 2.0 - (0.7 + 0.4 * (1.7f64.sqrt() - 0.7f64.sqrt()));
+        assert!((v("id(m1)") - 55e-6 * vov * vov * 1.2).abs() < 1e-9, "{}", v("id(m1)"));
+        // self-biased NJF (Vto=-2, β=100µ): Id·1k = u with u² - 14u + 4 = 0
+        assert!((v("v(s)") - (14.0 - 180f64.sqrt()) / 2.0).abs() < 1e-6, "{}", v("v(s)"));
+    }
+
     #[test]
     fn unknown_symbols_are_reported_not_merged() {
-        let (s, skipped) = import("SYMBOL res 0 0 R0\nSYMATTR InstName R1\nSYMATTR Value 1k\nSYMBOL Opamps\\\\LT1001 100 0 R0\nSYMATTR InstName U1\nSYMATTR Value LT1001\nSYMBOL nmos4 300 0 R0\nSYMBOL nmos4 400 0 R0\n");
-        assert_eq!(skipped, ["Opamps\\\\LT1001", "nmos4"]);
+        let (s, skipped) = import("SYMBOL res 0 0 R0\nSYMATTR InstName R1\nSYMATTR Value 1k\nSYMBOL Opamps\\\\LT1001 100 0 R0\nSYMATTR InstName U1\nSYMATTR Value LT1001\nSYMBOL csw 300 0 R0\nSYMBOL csw 400 0 R0\n");
+        assert_eq!(skipped, ["Opamps\\\\LT1001", "csw"]);
         assert_eq!(s.comps.len(), 1);
         assert_eq!((s.comps[0].name.as_str(), s.comps[0].value.as_str()), ("R1", "1k"));
     }

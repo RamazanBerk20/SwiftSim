@@ -31,15 +31,20 @@ On Windows the same commands produce `swiftsim.exe` (no console window in releas
   `.ac` (dec/oct/lin), `.dc` (one or two nested sweeps)
 - `.step` (param / source / element; lin, dec, oct, list; nested), `.meas`
   (AVG, MAX, MIN, PP, RMS, INTEG, FIND…AT, FIND…WHEN, WHEN, TRIG/TARG, PARAM),
-  `.param` with expressions, `.ic`, `.options`, `.model`, `.subckt` with `params:`,
+  `.param` with expressions, `.func` user functions (global or per `.subckt`), `.ic`,
+  `.options`, `.model`, `.subckt` with `params:`,
   `.include` / `.lib` (incl. sections)
 - Elements: R, C (Rser/Rpar, IC), L (Rser, IC), K (mutual coupling), V/I with DC, AC,
   PULSE, SIN/SINE, EXP, PWL, SFFM (V: Rser), D (junction caps, breakdown/zener),
   Q (Gummel-Poon DC, junction/diffusion charge, RB/RC/RE), M (level 1 and LTSpice VDMOS
-  with body diode), E/F/G/H, E/G `value={…}`, B (behavioral V=/I= with `V()`, `I()`,
-  `time`, `if()`, math), S (voltage switch with hysteresis), X (subcircuits)
+  with body diode), J (NJF/PJF JFET: VTO, BETA, LAMBDA, IS, N, RD, RS, CGS, CGD, PB, M, FC),
+  E/F/G/H incl. `POLY(n)`, E/G `value={…}` and `table=(…)` / `TABLE {expr}=(…)`,
+  B (behavioral V=/I= with `V()`, `I()`, `time`, `if()`, math), S (voltage switch with
+  hysteresis), X (subcircuits)
+- Vendor macromodels in the classic PSpice style run unmodified, e.g. TI's TL072 and
+  LM358 (checked in `tests/models/`)
 - Expressions: `+ - * / ** ^`, comparisons, `&& ||`, `?:`, `if`, `min/max/limit`,
-  trig/exp/log, `u()`, `uramp()`, Monte Carlo `mc() gauss() flat() rand()`
+  trig/exp/log, `u()`, `uramp()`, `table(x, x1,y1, …)`, Monte Carlo `mc() gauss() flat() rand()`
 - LTSpice conventions: SI suffixes (`4k7`, `1meg`, `10uF`), `;` comments, inductor
   default Rser = 1 mΩ, current sign conventions (I(V1) into +, Ic into collector…)
 - Convergence aids: pn-junction and FET voltage limiting, gmin stepping, source stepping
@@ -81,9 +86,12 @@ Pan with middle or right drag, zoom with the wheel.
 Being explicit, since the goal is LTSpice parity:
 
 - Analyses: `.noise`, `.tf`, `.four`, `.temp` / temperature dependence (everything is 27 °C)
-- Devices: JFET, MESFET, transmission lines (T/O), current-controlled switch (W),
+- Devices: MESFET, transmission lines (T/O), current-controlled switch (W),
   MOSFET levels above 1 / BSIM (they run with level-1 equations and a warning in the Log),
-  LTSpice digital/XSPICE `A` devices, E/G `laplace=` and `table=`, `.func`
+  LTSpice digital/XSPICE `A` devices, E/G `laplace=`
+- JFET extras: gate recombination current (ISR/NR), impact ionization (ALPHA/VK), the
+  B (doping tail) parameter and noise parameters are ignored
+- `.func` functions are not visible in `.meas` expressions
 - Import of LTSpice `.asc` schematics and `.asy` symbols; hierarchical schematics; custom symbols
 - Sparse matrix solver: the engine uses dense LU with sparse-aware elimination —
   fast up to a few hundred nodes, slow for multi-thousand-node netlists
@@ -101,7 +109,8 @@ src/netlist.rs   parser, subcircuit flattening, models, built-in library
 src/sim.rs       OP / DC / AC / transient, .step orchestration
 src/measure.rs   .meas and plot expressions
 src/gui/         app shell, schematic model + netlister, canvas editor, waveform viewer
-tests/engine.rs  analytic checks (RC/RL/LC, AC, diodes, BJT, MOS, sources, .meas …)
+tests/engine.rs  analytic checks (RC/RL/LC, AC, diodes, BJT, MOS, JFET, POLY/table/.func, .meas …)
+tests/models/    public vendor macromodels used by the tests
 ```
 
 ```bash

@@ -18,6 +18,10 @@ pub enum Kind {
     Pnp,
     Nmos,
     Pmos,
+    Nmos4,
+    Pmos4,
+    Njf,
+    Pjf,
     OpAmp,
     Vcvs,
     Vccs,
@@ -28,7 +32,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 17] = [
+    pub const ALL: [Kind; 21] = [
         Kind::Resistor,
         Kind::Capacitor,
         Kind::Inductor,
@@ -39,6 +43,10 @@ impl Kind {
         Kind::Pnp,
         Kind::Nmos,
         Kind::Pmos,
+        Kind::Nmos4,
+        Kind::Pmos4,
+        Kind::Njf,
+        Kind::Pjf,
         Kind::OpAmp,
         Kind::Vcvs,
         Kind::Vccs,
@@ -60,6 +68,10 @@ impl Kind {
             Kind::Pnp => "PNP transistor",
             Kind::Nmos => "N-MOSFET",
             Kind::Pmos => "P-MOSFET",
+            Kind::Nmos4 => "N-MOSFET (4-pin)",
+            Kind::Pmos4 => "P-MOSFET (4-pin)",
+            Kind::Njf => "N-JFET",
+            Kind::Pjf => "P-JFET",
             Kind::OpAmp => "Op-amp",
             Kind::Vcvs => "VCVS (E)",
             Kind::Vccs => "VCCS (G)",
@@ -73,7 +85,7 @@ impl Kind {
     pub fn category(self) -> &'static str {
         match self {
             Kind::Resistor | Kind::Capacitor | Kind::Inductor => "Passive",
-            Kind::Diode | Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos => "Semiconductor",
+            Kind::Diode | Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 | Kind::Njf | Kind::Pjf => "Semiconductor",
             Kind::Voltage | Kind::Current | Kind::Vcvs | Kind::Vccs | Kind::Behavioral => "Sources",
             Kind::OpAmp | Kind::Switch => "Blocks",
             Kind::Ground | Kind::Label => "Wiring",
@@ -107,7 +119,8 @@ impl Kind {
             Kind::Voltage => "V",
             Kind::Current => "I",
             Kind::Npn | Kind::Pnp => "Q",
-            Kind::Nmos | Kind::Pmos => "M",
+            Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 => "M",
+            Kind::Njf | Kind::Pjf => "J",
             Kind::OpAmp => "U",
             Kind::Vcvs => "E",
             Kind::Vccs => "G",
@@ -129,6 +142,10 @@ impl Kind {
             Kind::Pnp => "2N3906",
             Kind::Nmos => "2N7000",
             Kind::Pmos => "BSS84",
+            Kind::Nmos4 => "NMOS_GENERIC W=10u L=1u",
+            Kind::Pmos4 => "PMOS_GENERIC W=20u L=1u",
+            Kind::Njf => "NJF",
+            Kind::Pjf => "PJF",
             Kind::OpAmp => "Aol=100k GBW=10Meg",
             Kind::Vcvs | Kind::Vccs => "1",
             Kind::Behavioral => "V=V(in)*2",
@@ -146,6 +163,10 @@ impl Kind {
             Kind::Pnp => &["pnp"],
             Kind::Nmos => &["nmos", "vdmos"],
             Kind::Pmos => &["pmos", "vdmos"],
+            Kind::Nmos4 => &["nmos"],
+            Kind::Pmos4 => &["pmos"],
+            Kind::Njf => &["njf"],
+            Kind::Pjf => &["pjf"],
             Kind::Switch => &["sw"],
             _ => &[],
         }
@@ -193,7 +214,8 @@ pub enum Prim {
 pub fn pins(k: Kind) -> &'static [P] {
     match k {
         Kind::Resistor | Kind::Capacitor | Kind::Inductor | Kind::Diode | Kind::Voltage | Kind::Current | Kind::Behavioral => &[[0, -2], [0, 2]],
-        Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos => &[[1, -2], [-2, 0], [1, 2]],
+        Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos | Kind::Njf | Kind::Pjf => &[[1, -2], [-2, 0], [1, 2]],
+        Kind::Nmos4 | Kind::Pmos4 => &[[1, -2], [-2, 0], [1, 2], [1, 0]],
         Kind::OpAmp => &[[-2, 1], [-2, -1], [2, 0]],
         Kind::Vcvs | Kind::Vccs | Kind::Switch => &[[0, -2], [0, 2], [-2, -1], [-2, 1]],
         Kind::Ground | Kind::Label => &[[0, 0]],
@@ -265,7 +287,8 @@ pub fn symbol(k: Kind) -> Vec<Prim> {
             });
             v
         }
-        Kind::Nmos | Kind::Pmos => {
+        Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 => {
+            let four = matches!(k, Kind::Nmos4 | Kind::Pmos4);
             let mut v = vec![
                 Line(vec![[-2., 0.], [-0.8, 0.]]),
                 Line(vec![[-0.8, -0.8], [-0.8, 0.8]]),
@@ -274,15 +297,23 @@ pub fn symbol(k: Kind) -> Vec<Prim> {
                 Line(vec![[-0.5, 0.45], [-0.5, 1.0]]),
                 Line(vec![[-0.5, -0.7], [1., -0.7], [1., -2.]]),
                 Line(vec![[-0.5, 0.7], [1., 0.7], [1., 2.]]),
-                Line(vec![[-0.5, 0.], [1., 0.], [1., 0.7]]),
+                // 3-pin parts tie the body to the source; 4-pin parts bring it out
+                Line(if four { vec![[-0.5, 0.], [1., 0.]] } else { vec![[-0.5, 0.], [1., 0.], [1., 0.7]] }),
             ];
-            v.push(if k == Kind::Nmos {
+            v.push(if matches!(k, Kind::Nmos | Kind::Nmos4) {
                 Poly(vec![[-0.45, 0.], [-0.05, -0.22], [-0.05, 0.22]])
             } else {
                 Poly(vec![[0.45, 0.], [0.05, -0.22], [0.05, 0.22]])
             });
             v
         }
+        Kind::Njf | Kind::Pjf => vec![
+            Line(vec![[-2., 0.], [-0.5, 0.]]),
+            Line(vec![[-0.5, -1.0], [-0.5, 1.0]]),
+            Line(vec![[-0.5, -0.7], [1., -0.7], [1., -2.]]),
+            Line(vec![[-0.5, 0.7], [1., 0.7], [1., 2.]]),
+            if k == Kind::Njf { Poly(vec![[-0.55, 0.], [-1.0, -0.22], [-1.0, 0.22]]) } else { Poly(vec![[-1.0, 0.], [-0.55, -0.22], [-0.55, 0.22]]) },
+        ],
         Kind::OpAmp => vec![
             Poly(vec![[-1.5, -1.8], [-1.5, 1.8], [1.6, 0.]]),
             Line(vec![[-2., -1.], [-1.5, -1.]]),
@@ -341,7 +372,7 @@ pub fn bbox(k: Kind) -> ([f32; 2], [f32; 2]) {
     match k {
         Kind::Resistor | Kind::Inductor | Kind::Diode | Kind::Capacitor => ([-0.8, -2.0], [0.8, 2.0]),
         Kind::Voltage | Kind::Current | Kind::Behavioral => ([-1.0, -2.0], [1.0, 2.0]),
-        Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos => ([-2.0, -2.0], [1.6, 2.0]),
+        Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 | Kind::Njf | Kind::Pjf => ([-2.0, -2.0], [1.6, 2.0]),
         Kind::OpAmp => ([-2.0, -1.8], [2.0, 1.8]),
         Kind::Vcvs | Kind::Vccs | Kind::Switch => ([-2.0, -2.0], [1.0, 2.0]),
         Kind::Ground => ([-0.8, 0.0], [0.8, 1.3]),
@@ -383,7 +414,7 @@ impl Component {
         Some(match self.kind {
             Kind::Ground | Kind::Label | Kind::OpAmp => return None,
             Kind::Npn | Kind::Pnp => format!("Ic({n})"),
-            Kind::Nmos | Kind::Pmos => format!("Id({n})"),
+            Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 | Kind::Njf | Kind::Pjf => format!("Id({n})"),
             _ => format!("I({n})"),
         })
     }
@@ -541,14 +572,16 @@ impl Schematic {
                     format!("{name} {} {} {v}", n[0], n[1])
                 }
                 Kind::Diode => format!("{name} {} {} {}", n[0], n[1], if v.is_empty() { "D" } else { v }),
-                Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos => {
+                Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 | Kind::Njf | Kind::Pjf => {
                     let def = match c.kind {
                         Kind::Npn => "NPN",
                         Kind::Pnp => "PNP",
-                        Kind::Nmos => "NMOS",
+                        Kind::Nmos | Kind::Nmos4 => "NMOS",
+                        Kind::Njf => "NJF",
+                        Kind::Pjf => "PJF",
                         _ => "PMOS",
                     };
-                    format!("{name} {} {} {} {}", n[0], n[1], n[2], if v.is_empty() { def } else { v })
+                    format!("{name} {} {}", n.join(" "), if v.is_empty() { def } else { v })
                 }
                 Kind::OpAmp => {
                     opamp = true;

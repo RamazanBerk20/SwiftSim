@@ -2,7 +2,7 @@
 //! parameters, models, `.param`, directives, and flattening into a Circuit.
 
 use crate::devices::*;
-use crate::expr::{Expr, VarEnv, parse_number};
+use crate::expr::{Expr, Funcs, Op, VarEnv, parse_func, parse_number};
 use crate::sim::{Circuit, Options};
 use crate::solver::C64;
 use std::collections::HashMap;
@@ -10,7 +10,25 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-type Scope = HashMap<String, f64>;
+/// Parameter values plus the `.func`s visible at that level.
+#[derive(Clone, Debug, Default)]
+pub struct Scope {
+    pub vars: HashMap<String, f64>,
+    pub funcs: Rc<Funcs>,
+}
+
+impl std::ops::Deref for Scope {
+    type Target = HashMap<String, f64>;
+    fn deref(&self) -> &Self::Target {
+        &self.vars
+    }
+}
+
+impl std::ops::DerefMut for Scope {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.vars
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct Line {
@@ -28,6 +46,7 @@ pub struct Model {
 pub struct Subckt {
     pub ports: Vec<String>,
     pub params: Vec<(String, String)>,
+    pub funcs: Funcs,
     pub body: Vec<Line>,
 }
 
@@ -53,6 +72,7 @@ pub struct Deck {
     pub subckts: HashMap<String, Subckt>,
     pub models: HashMap<String, Model>,
     pub params: Vec<(String, String)>,
+    pub funcs: Funcs,
     pub analysis: Option<Line>,
     pub steps: Vec<Line>,
     pub meas: Vec<Line>,
@@ -236,7 +256,7 @@ fn eval_str(s: &str, sc: &Scope) -> Result<f64, String> {
         return Ok(v);
     }
     let inner = s.trim_matches('\'').trim_matches('"');
-    Expr::parse(inner)?.eval(&VarEnv(&|n| sc.get(n).copied())).map_err(|e| format!("'{s}': {e}"))
+    Expr::parse(inner)?.inline(&sc.funcs)?.eval(&VarEnv(&|n| sc.get(n).copied())).map_err(|e| format!("'{s}': {e}"))
 }
 
 /// Skip `n` whitespace-separated words and return the remainder.
@@ -320,7 +340,7 @@ impl Deck {
                             i += 1;
                         }
                     }
-                    stack.push((name, Subckt { ports, params, body: vec![] }));
+                    stack.push((name, Subckt { ports, params, funcs: Funcs::new(), body: vec![] }));
                     continue;
                 }
                 ".ends" => {
@@ -333,10 +353,15 @@ impl Deck {
                     self.models.insert(n, m);
                     continue;
                 }
+                ".func" => {
+                    let (n, f) = parse_func(after_words(&l.text, 1)).map_err(|e| format!("line {}: {e}", l.no))?;
+                    stack.last_mut().map_or(&mut self.funcs, |(_, s)| &mut s.funcs).insert(n, f);
+                    continue;
+                }
                 _ => {}
             }
             if let Some((_, sub)) = stack.last_mut() {
-                if first == ".param" {
+                if first == ".param" || first == ".params" {
                     sub.params.extend(parse_assignments(after_words(&l.text, 1)));
                 } else {
                     sub.body.push(l);
@@ -367,8 +392,8 @@ impl Deck {
         Ok(())
     }
 
-    pub fn eval_params(&self, over: &HashMap<String, f64>) -> Result<HashMap<String, f64>, String> {
-        let mut sc: Scope = over.clone();
+    pub fn eval_params(&self, over: &HashMap<String, f64>) -> Result<Scope, String> {
+        let mut sc = Scope { vars: over.clone(), funcs: Rc::new(self.funcs.clone()) };
         let mut pending: Vec<&(String, String)> = self.params.iter().filter(|(k, _)| !over.contains_key(k)).collect();
         while !pending.is_empty() {
             let before = pending.len();
@@ -514,12 +539,13 @@ impl Deck {
     fn is_model(&self, name: &str) -> bool {
         self.models.contains_key(name)
             || builtin_models().contains_key(name)
-            || matches!(name, "d" | "npn" | "pnp" | "nmos" | "pmos" | "sw")
+            || matches!(name, "d" | "npn" | "pnp" | "nmos" | "pmos" | "njf" | "pjf" | "sw")
     }
 
     fn node_count(&self, kind: char, toks: &[String]) -> Result<usize, String> {
         Ok(match kind {
             'r' | 'c' | 'l' | 'd' | 'v' | 'i' | 'b' | 'f' | 'h' => 2,
+            'j' => 3,
             'e' | 'g' => {
                 let t2 = toks.get(2).map(|s| s.as_str()).unwrap_or("");
                 if matches!(t2, "value" | "table" | "laplace" | "poly") { 2 } else { 4 }
@@ -581,6 +607,9 @@ impl Deck {
                 return Err(err(format!("{name}: {} nodes given, subcircuit '{sname}' has {} ports", nodes.len(), sub.ports.len())));
             }
             let mut sc: Scope = (**global).clone();
+            if !sub.funcs.is_empty() {
+                sc.funcs = Rc::new(global.funcs.iter().chain(&sub.funcs).map(|(k, v)| (k.clone(), v.clone())).collect());
+            }
             let mut inst = vec![];
             let mut i = end;
             while i < rest.len() {
@@ -613,7 +642,54 @@ impl Deck {
             return Err(err(format!("{name}: expected {nn} nodes")));
         }
         let nodes: Vec<String> = rest[..nn].iter().map(|n| mapn(n)).collect();
-        let mut toks: Vec<String> = rest[nn..].to_vec();
+        let r = &rest[nn..];
+        let sigv = |a: &str, b: &str| Expr::Bin(Op::Sub, Box::new(Expr::Sig(format!("v({a})"))), Box::new(Expr::Sig(format!("v({b})"))));
+        let parse = |t: &String| Expr::parse(t).map_err(err);
+        let src = if matches!(kind, 'e' | 'f' | 'g' | 'h') && r.first().is_some_and(|t| t == "poly") {
+            // POLY(n) (a,b)… | vname… c0 c1 …: parentheses and commas are only separators
+            let t: Vec<&String> = r[1..].iter().filter(|t| *t != "(" && *t != ")").collect();
+            let n = t.first().and_then(|n| n.parse::<usize>().ok()).filter(|&n| n > 0).ok_or_else(|| err(format!("{name}: bad POLY(n)")))?;
+            let vc = matches!(kind, 'e' | 'g');
+            let k = 1 + if vc { 2 * n } else { n };
+            if t.len() < k {
+                return Err(err(format!("{name}: POLY({n}) needs {} controls", if vc { "node pairs as" } else { "source names as" })));
+            }
+            let x: Vec<Expr> = if vc { t[1..k].chunks(2).map(|p| sigv(p[0], p[1])).collect() } else { t[1..k].iter().map(|v| Expr::Sig(format!("i({v})"))).collect() };
+            let c = t[k..].iter().map(|c| parse(c)).collect::<Result<Vec<_>, _>>()?;
+            Some((matches!(kind, 'e' | 'h'), poly(&x, &c)))
+        } else if let (true, Some(i)) = (matches!(kind, 'e' | 'g'), r.iter().position(|t| t == "table")) {
+            // nc+ nc- table=(x,y …)  or  table {expr} = (x,y) …
+            let (x, pts) = if nn == 4 { (sigv(&rest[2], &rest[3]), i + 2) } else { (parse(r.get(i + 1).ok_or_else(|| err(format!("{name}: table needs an input")))?)?, i + 3) };
+            let mut a = vec![x];
+            for t in r.iter().skip(pts).filter(|t| *t != "(" && *t != ")") {
+                a.push(parse(t)?);
+            }
+            Some((kind == 'e', Expr::Call("table".into(), a)))
+        } else if kind == 'b' || (matches!(kind, 'e' | 'g') && nn == 2) {
+            let r = after_words(&line.text, 3);
+            let is_v = if kind == 'b' { r.starts_with('v') } else { kind == 'e' };
+            if (kind == 'b' && !(r.starts_with('v') || r.starts_with('i'))) || (kind != 'b' && !r.starts_with("value")) {
+                return Err(err(format!("{name}: expected V=<expr> or I=<expr>")));
+            }
+            let eq = r.find('=').ok_or_else(|| err(format!("{name}: missing '='")))?;
+            Some((is_v, Expr::parse(r[eq + 1..].trim()).map_err(err)?))
+        } else {
+            None
+        };
+        let sig = |s: &str| -> String {
+            if let Some(n) = s.strip_prefix("v(").and_then(|r| r.strip_suffix(')')) {
+                format!("v({})", mapn(n))
+            } else if let Some(o) = s.find('(') {
+                format!("{}({prefix}{}", &s[..o], &s[o + 1..])
+            } else {
+                s.to_string()
+            }
+        };
+        let expr = match src {
+            Some((is_v, e)) => Some((is_v, e.inline(&scope.funcs).map_err(err)?.resolve(&|n| scope.get(n).copied(), &sig))),
+            None => None,
+        };
+        let mut toks: Vec<String> = r.to_vec();
         match kind {
             'f' | 'h' if !toks.is_empty() => toks[0] = format!("{prefix}{}", toks[0]),
             'k' if toks.len() >= 2 => {
@@ -621,27 +697,6 @@ impl Deck {
                 toks[1] = format!("{prefix}{}", toks[1]);
             }
             _ => {}
-        }
-        let mut expr = None;
-        if kind == 'b' || (matches!(kind, 'e' | 'g') && nn == 2) {
-            let r = after_words(&line.text, 3);
-            let is_v = if kind == 'b' { r.starts_with('v') } else { kind == 'e' };
-            if (kind == 'b' && !(r.starts_with('v') || r.starts_with('i'))) || (kind != 'b' && !r.starts_with("value")) {
-                return Err(err(format!("{name}: expected V=<expr> or I=<expr>")));
-            }
-            let eq = r.find('=').ok_or_else(|| err(format!("{name}: missing '='")))?;
-            let src = r[eq + 1..].trim();
-            let e = Expr::parse(src).map_err(err)?;
-            let sig = |s: &str| -> String {
-                if let Some(n) = s.strip_prefix("v(").and_then(|r| r.strip_suffix(')')) {
-                    format!("v({})", mapn(n))
-                } else if let Some(o) = s.find('(') {
-                    format!("{}({prefix}{}", &s[..o], &s[o + 1..])
-                } else {
-                    s.to_string()
-                }
-            };
-            expr = Some((is_v, e.resolve(&|n| scope.get(n).copied(), &sig)));
         }
         out.push(Flat { line: line.no, kind, name: full, nodes, toks, scope: scope.clone(), expr });
         Ok(())
@@ -1111,6 +1166,26 @@ impl Builder<'_> {
                     self.devs.push(Box::new(Mos { name, d: di, g: gt, s: si, b, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0 }));
                 }
             }
+            'j' => {
+                let m = self.deck.model(pos.first().ok_or("missing model")?, &["njf", "pjf"])?;
+                let area = pos.get(1).map_or(kvn("area", 1.0), |v| num(v))?;
+                let g = |k: &[&str], d: f64| mparam(&m, k, d, &sc);
+                let pol = if m.kind == "pjf" { -1.0 } else { 1.0 };
+                let gt = nd[1];
+                let di = self.series(&name, "d", nd[0], g(&["rd"], 0.0)? / area);
+                let si = self.series(&name, "s", nd[2], g(&["rs"], 0.0)? / area);
+                // SPICE uses VTO unsigned for both polarities; Mos multiplies it by pol
+                let md = MosModel { pol, vto: pol * g(&["vto", "vt0"], -2.0)?, kp: 0.0, gamma: 0.0, phi: 0.6, lambda: g(&["lambda"], 0.0)?, cgs: 0.0, cgd: 0.0, cbd: 0.0, cbs: 0.0 };
+                let beta = 2.0 * g(&["beta"], 1e-4)? * area;
+                let ch = Mos { name: name.clone(), d: di, g: gt, s: si, b: si, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0 };
+                let junction = |tag: &str, ch: usize, c: f64| -> Result<Diode, String> {
+                    let md = DiodeModel { is: g(&["is"], 1e-14)? * area, n: g(&["n"], 1.0)?, cjo: c * area, vj: g(&["pb"], 1.0)?, m: g(&["m"], 0.5)?, tt: 0.0, bv: f64::INFINITY, ibv: 1e-3, nbv: 1.0, fc: g(&["fc"], 0.5)? };
+                    let (a, k) = if pol > 0.0 { (gt, ch) } else { (ch, gt) };
+                    Ok(Diode { name: format!("{name}#{tag}"), a, k, md, s: 0, vd_old: 0.0 })
+                };
+                let (gs, gd) = (junction("gs", si, g(&["cgs"], 0.0)?)?, junction("gd", di, g(&["cgd"], 0.0)?)?);
+                self.devs.push(Box::new(Jfet { name, ch, gs, gd }));
+            }
             'e' | 'g' | 'f' | 'h' => {
                 if let Some((is_v, e)) = &f.expr {
                     self.devs.push(Box::new(BSource { name, a: nd[0], b: nd[1], is_v: *is_v, expr: e.clone(), bound: Expr::Num(0.0), deps: vec![], k: 0 }));
@@ -1159,6 +1234,23 @@ impl Builder<'_> {
         }
         Ok(())
     }
+}
+
+/// SPICE POLY polynomial: c0 + Σ ci·xi + Σ cij·xi·xj (i ≤ j, lexicographic) + … cubic …
+fn poly(x: &[Expr], c: &[Expr]) -> Expr {
+    // a lone POLY(1) coefficient is the linear gain
+    let c = if x.len() == 1 && c.len() == 1 { vec![Expr::Num(0.0), c[0].clone()] } else { c.to_vec() };
+    let (mut terms, mut level): (Vec<Vec<usize>>, Vec<Vec<usize>>) = (vec![], vec![vec![]]);
+    while terms.len() < c.len() {
+        terms.extend(level.iter().cloned());
+        level = level.iter().flat_map(|t| (t.last().copied().unwrap_or(0)..x.len()).map(move |j| [t.as_slice(), &[j]].concat())).collect();
+    }
+    c.iter()
+        .zip(&terms)
+        .filter(|(k, _)| !matches!(k, Expr::Num(v) if *v == 0.0))
+        .map(|(k, t)| t.iter().fold(k.clone(), |a, &j| Expr::Bin(Op::Mul, Box::new(a), Box::new(x[j].clone()))))
+        .reduce(|a, b| Expr::Bin(Op::Add, Box::new(a), Box::new(b)))
+        .unwrap_or(Expr::Num(0.0))
 }
 
 fn mparam(m: &Model, keys: &[&str], def: f64, sc: &Scope) -> Result<f64, String> {
