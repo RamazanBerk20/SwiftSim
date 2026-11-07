@@ -46,6 +46,7 @@ cargo build --release
 ./target/release/swiftsim my.cir           # open a SPICE netlist in the text editor
 ./target/release/swiftsim -b my.cir -o out.csv   # batch run, log + CSV export
 ./target/release/swiftsim -b my.asc              # batch-run an LTspice schematic
+./target/release/swiftsim -b my.sws --netlist    # batch-run a saved schematic, print its netlist
 ```
 
 On Windows the same commands produce `swiftsim.exe` (no console window in release builds).
@@ -181,8 +182,6 @@ Being explicit, since the goal is LTSpice parity:
 - `.func` functions are not visible in `.meas` expressions
 - `.asc` import: non-stock symbols other than subcircuits (`Prefix X`), the `.asy` drawing
   (subcircuits show as a box), hierarchical schematics
-- Sparse matrix solver: the engine uses dense LU with sparse-aware elimination —
-  fast up to a few hundred nodes, slow for multi-thousand-node netlists
 - VDMOS gate-drain capacitance is constant (LTSpice's is voltage-dependent); level-1
   MOSFETs have constant (non-Meyer) capacitances
 - Waveform-file export in `.raw` format
@@ -191,7 +190,7 @@ Being explicit, since the goal is LTSpice parity:
 
 ```
 src/expr.rs      numbers with SI suffixes, expression parser/evaluator
-src/solver.rs    MNA matrix, LU (real + complex)
+src/solver.rs    MNA matrix, dense and sparse LU (real + complex)
 src/devices.rs   device models and stamps
 src/netlist.rs   parser, subcircuit flattening, models, built-in library
 src/sim.rs       OP / DC / AC / noise / transient, .step orchestration
