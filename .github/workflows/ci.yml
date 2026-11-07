@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --release
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: swiftsim-${{ runner.os }}
+          path: target/release/swiftsim${{ runner.os == 'Windows' && '.exe' || '' }}
+          if-no-files-found: error
