@@ -14,6 +14,11 @@ How it compares:
   .tran       every sample of each run against the other run's samples around that
               instant, max error <= WAVE_RTOL * signal range (ngspice's)
   .ac         magnitude (dB) and phase (deg) at points within AC_FLOOR_DB of the peak
+  .noise      V(onoise)/V(inoise) densities as .ac magnitudes (ngspice's onoise_spectrum /
+              inoise_spectrum), and the integrated totals (SwiftSim's log) within AC_DB: output
+              against ngspice's onoise_total, input against the power-law integral of ngspice's
+              inoise spectrum (ngspice's inoise_total takes each interval's slope from the output
+              density, 0.5 dB high on rc_lowpass_noise where the gain rolls off)
   oscillators mean period from mid-level crossings (SPECIAL "period")
 ngspice has no .step: each .step combination becomes its own ngspice deck
 (.param / .options temp=), matched to SwiftSim's stepped runs in order.
@@ -30,6 +35,8 @@ Known differences, kept out of the decks or covered by a tolerance below:
   - BJT: XTF/VTF/ITF are not implemented (the models leave them out), and SwiftSim does
     not divide the TF charge by qb as SPICE3 does: ~0.3% longer storage time in
     bjt_switch_tran (within tolerance).
+  - Noise: ngspice's VDMOS gate resistance (model RG) is noiseless; SwiftSim gives it
+    thermal noise like any resistor (vdmos_cs_noise leaves RG out).
   - ngspice's own error: switch flips land up to a step early (SPECIAL).
 """
 
@@ -158,6 +165,7 @@ def read_raw(path):
         nv, npt = int(info["No. Variables"]), int(info["No. Points"])
         names = [hdr[k + 1 + j].split()[1].lower() for j in range(nv)]
         names = [f"i({n[:-7]})" if n.endswith("#branch") else n for n in names]
+        names = [{"onoise_spectrum": "v(onoise)", "inoise_spectrum": "v(inoise)"}.get(n, n) for n in names]
         w = 2 if "complex" in info["Flags"] else 1
         a = array("d")
         a.frombytes(data[pos : pos + 8 * w * nv * npt])
@@ -175,7 +183,7 @@ def read_raw(path):
 
 
 def ngspice_runs(lines, tmp):
-    runs, notes = [], []
+    runs, notes, totals = [], [], []
     for i, deck in enumerate(ngspice_decks(lines)):
         cir, raw = tmp / f"ng{i}.cir", tmp / f"ng{i}.raw"
         cir.write_text(deck)
@@ -185,12 +193,14 @@ def ngspice_runs(lines, tmp):
         if not raw.exists():
             raise RuntimeError("ngspice produced no data:\n" + "\n".join(log.splitlines()[-15:]))
         for name, names, cols in read_raw(raw):
-            if name == "Operating Point":
+            if name == "Integrated Noise":  # v(onoise_total), v(inoise_total)
+                totals.append({n[2:-7]: cols[n][0] for n in names})
+            elif name == "Operating Point":
                 runs.append(([0.0], {n: cols[n] for n in names}))
             else:
                 x = [v.real if isinstance(v, complex) else v for v in cols[names[0]]]
                 runs.append((x, {n: cols[n] for n in names[1:]}))
-    return runs, notes
+    return runs, notes, totals
 
 
 def swiftsim_runs(lines, tmp):
@@ -201,6 +211,10 @@ def swiftsim_runs(lines, tmp):
     if p.returncode != 0 or not out.exists():
         raise RuntimeError("swiftsim failed:\n" + (p.stdout + p.stderr)[-2000:])
     notes = [ln.strip() for ln in p.stdout.splitlines() if ln.startswith("warning")]
+    si = {"T": 1e12, "G": 1e9, "M": 1e6, "k": 1e3, "m": 1e-3, "µ": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15}
+    found = re.findall(r"Total (output|input-referred) noise: (\S+?)([TGMkmµnpf]?)V rms", p.stdout)
+    vals = [float(v) * si.get(u, 1.0) for _, v, u in found]
+    totals = [{"onoise": a, "inoise": b} for a, b in zip(vals[::2], vals[1::2])]
     blocks = []
     for ln in out.read_text().splitlines():
         if ln.startswith("#"):
@@ -224,7 +238,21 @@ def swiftsim_runs(lines, tmp):
                 sig[hdr[j]] = list(cols[j])
                 j += 1
         runs.append((list(cols[0]), sig))
-    return kind, runs, notes
+    return kind, runs, notes, totals
+
+
+def integrate_psd(f, v):
+    """Integral of v(f)^2 df, each interval a power law between its end points: V^2."""
+    tot = 0.0
+    for f0, f1, v0, v1 in zip(f, f[1:], v, v[1:]):
+        s0, s1 = v0 * v0, v1 * v1
+        if s0 <= 0 or s1 <= 0:
+            tot += (s0 + s1) / 2 * (f1 - f0)
+            continue
+        r = math.log(f1 / f0)
+        e = math.log(s1 / s0) / r + 1
+        tot += s0 * f0 * r if abs(e) < 1e-10 else s0 * f0 / e * ((f1 / f0) ** e - 1)
+    return tot
 
 
 def interp(xs, ys, x):
@@ -334,9 +362,9 @@ def main():
             try:
                 lines = prepare(f)
                 t0 = time.time()
-                kind, sw, sw_notes = swiftsim_runs(lines, tmp)
+                kind, sw, sw_notes, sw_tot = swiftsim_runs(lines, tmp)
                 t1 = time.time()
-                ng, ng_notes = ngspice_runs(lines, tmp)
+                ng, ng_notes, ng_tot = ngspice_runs(lines, tmp)
                 t2 = time.time()
             except Exception as e:
                 failed += 1
@@ -351,6 +379,14 @@ def main():
             print(f"FAIL  {f.name}: {len(sw)} SwiftSim runs vs {len(ng)} ngspice runs")
             continue
         res = compare(kind, sw, ng, spec)
+        if len(sw_tot) != len(ng_tot):
+            res.append((math.inf, "noise totals", f"{len(sw_tot)} SwiftSim vs {len(ng_tot)} ngspice"))
+        for (x, sig), b in zip((r for r in ng if "v(inoise)" in r[1]), ng_tot):
+            b["inoise"] = math.sqrt(integrate_psd(x, sig["v(inoise)"]))
+        for a, b in zip(sw_tot, ng_tot):
+            for key in ("onoise", "inoise"):
+                e = abs(20 * math.log10(a[key] / b[key]))
+                res.append((e / spec.get("ac_db", AC_DB), f"{key}_total", f"{a[key]:.5g} vs {b[key]:.5g} V rms ({e:.3g} dB)"))
         if not res:
             failed += 1
             print(f"FAIL  {f.name}: no common signals")

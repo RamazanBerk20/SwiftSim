@@ -285,6 +285,24 @@ impl<T: Scalar> Matrix<T> {
         self.stamp([(a, k, one), (b, k, m1), (k, a, one), (k, b, m1)]);
     }
 
+    /// Clear `t` and load the transpose of this matrix into it, with an empty
+    /// right-hand side (adjoint solves: one Aᵀ·y = c gives c·A⁻¹·b for every b).
+    pub fn transpose_into(&self, t: &mut Matrix<T>) {
+        t.clear();
+        let n = self.n;
+        if n <= DENSE_IDX {
+            for (k, &v) in self.a.iter().enumerate() {
+                if v != T::default() {
+                    t.add(k % n + 1, k / n + 1, v);
+                }
+            }
+        } else {
+            for (&(r, c), &v) in self.s.ent.iter().zip(&self.s.val) {
+                t.add(c as usize + 1, r as usize + 1, v);
+            }
+        }
+    }
+
     /// Solve; `x` has length n+1 and x[0] stays 0. Call `clear` and re-stamp before the next solve.
     /// On a singular matrix returns the unknown index that has no pivot.
     pub fn solve(&mut self, x: &mut [T]) -> Result<(), usize> {
@@ -755,6 +773,41 @@ mod tests {
                     b[i] -= v * x[j];
                 }
                 assert!(b[1..].iter().all(|r| r.abs() < 1e-12), "n={n} it={it}: {:?}", &b[1..]);
+            }
+        }
+    }
+
+    #[test]
+    fn transpose_solves_adjoint_in_all_storage_modes() {
+        // unsymmetric complex system (chain + one-way transconductances + a branch)
+        for n in [20, 60, 600] {
+            let mut a = vec![];
+            for i in 1..n - 1 {
+                let g = C64::new(1e-3 * i as f64, 1e-4);
+                a.extend([(i, i, g), (i + 1, i + 1, g), (i, i + 1, -g), (i + 1, i, -g)]);
+                if i + 3 < n - 1 {
+                    a.push((i, i + 3, C64::new(2e-4, 0.0)));
+                }
+            }
+            a.extend([(1, n, C64::from(1.0)), (n, 1, C64::from(1.0)), (n - 1, n - 1, C64::from(1e-3))]);
+            let (mut m, mut t) = (Matrix::<C64>::new(n), Matrix::<C64>::new(n));
+            for _ in 0..2 {
+                m.clear();
+                for &(i, j, v) in &a {
+                    m.add(i, j, v);
+                }
+                m.transpose_into(&mut t);
+                let mut c = vec![C64::default(); n + 1];
+                (c[n / 2], c[n - 1]) = (C64::from(1.0), C64::new(0.0, -2.0));
+                for (i, &v) in c.iter().enumerate() {
+                    t.rhs(i, v);
+                }
+                let mut y = vec![C64::default(); n + 1];
+                t.solve(&mut y).unwrap();
+                for &(i, j, v) in &a {
+                    c[j] -= v * y[i];
+                }
+                assert!(c[1..].iter().all(|r| r.norm() < 1e-12), "n={n}");
             }
         }
     }

@@ -55,7 +55,15 @@ On Windows the same commands produce `swiftsim.exe` (no console window in releas
 **Simulator engine** (`src/`, usable as a library)
 - Analyses: `.op`, `.tran` (adaptive trapezoidal with LTE control, breakpoints, `uic`),
   `.ac` (dec/oct/lin), `.dc` (one or two nested sweeps), `.tf V(out[,ref]) | I(Vx) <src>`
-  (DC small-signal gain, input and output impedance)
+  (DC small-signal gain, input and output impedance),
+  `.noise V(out[,ref]) <src> dec|oct|lin <n> <fstart> <fstop>`: `V(onoise)` and `V(inoise)`
+  (output and input-referred density, V/√Hz) and each part's share of the output noise as
+  `V(<part>)`; integrated totals and per-part shares in the Log. Noise sources: resistor
+  thermal 4kT/R (also RS/RB/RC/RE/RD/RG series resistors), diode shot 2qI + flicker
+  `KF·I^AF/f`, BJT collector and base shot + base flicker, MOSFET/JFET/VDMOS channel thermal
+  8/3·kT·gm + flicker (`KF`, `AF`; level-1 MOSFETs follow ngspice's `NLEV` 0–3, and without
+  `NLEV` use SPICE3's `KF·Id^AF/(f·W·L·Cox²)`, Cox from `TOX` or 100 nm). Solved by the adjoint
+  method: one transposed small-signal solve per frequency
 - `.four f0 [Nharmonics] [Nperiods] V(out) …` after `.tran`: harmonics, phases and THD in the Log
 - Temperature: `.temp t1 [t2 …]` (several values step them), `.step temp …`, `.options tnom=`;
   `temp` is usable in expressions. SPICE3 scaling of diode/BJT saturation currents (`XTI`, `EG`),
@@ -92,9 +100,10 @@ On Windows the same commands produce `swiftsim.exe` (no console window in releas
 - Properties panel: values, model picker (built-in + your `.model`s), structured
   source editor (DC / Pulse / Sine / Exp / PWL + AC), simulation-command form
 - Simulation runs in the background with progress and Stop
-- Probe: click a wire → voltage, click a part → current; labeled nets auto-plot
+- Probe: click a wire → voltage, click a part → current (after `.noise`: its noise
+  contribution); labeled nets auto-plot
 - Waveforms: separate V and A panes on a shared axis, Bode plots (dB + phase, log
-  axis), stepped runs overlaid, arbitrary trace expressions (`V(a)-V(b)`,
+  axis), noise spectra (log-log, V/√Hz), stepped runs overlaid, arbitrary trace expressions (`V(a)-V(b)`,
   `I(R1)*V(out)`), FFT, two cursors with Δ and 1/Δ readout, CSV export
 - `.op` voltages annotated on the schematic; Log shows OP tables, `.meas`, warnings
 - Netlist mode: edit and run any SPICE netlist directly (LTSpice `.net/.cir` files)
@@ -151,7 +160,10 @@ SWIFTSIM_LTSPICE_LIB=~/.wine/drive_c/users/$USER/AppData/Local/LTspice/lib ./tar
 
 Being explicit, since the goal is LTSpice parity:
 
-- Analyses: `.noise`
+- Noise: no resistor flicker noise or `noiseless` flag; JFET gate and level-1 MOSFET bulk
+  junctions are noiseless (as in SPICE); level-1 `NLEV=3` keeps 8/3·kT·gm channel noise
+  (ngspice's `GDSNOI` form is not implemented). LTspice's own MOSFET flicker formula is not verified
+  (no LTspice here): without `NLEV` SwiftSim assumes SPICE3's, ngspice defaults to `NLEV=2`
 - Temperature: no effect on C/L values, diode BV/RS, BJT RB/RC/RE, VDMOS VTO (VDMOS only scales KP)
   or JFET VTO/BETA (JFET gate junctions do scale); no per-model `TNOM`
 - Devices: MESFET, transmission lines (T/O), current-controlled switch (W),
@@ -161,7 +173,7 @@ Being explicit, since the goal is LTSpice parity:
   divided by qb as in SPICE3 (storage times ~0.3% longer when `VAF`/`IKF` are set)
 - Level-1 MOSFET bulk junctions take `IS` only (no `JS`·`AD`/`AS` area scaling)
 - JFET extras: gate recombination current (ISR/NR), impact ionization (ALPHA/VK), the
-  B (doping tail) parameter and noise parameters are ignored
+  B (doping tail) parameter are ignored
 - `.func` functions are not visible in `.meas` expressions
 - `.asc` import: non-stock symbols other than subcircuits (`Prefix X`), the `.asy` drawing
   (subcircuits show as a box), hierarchical schematics
@@ -178,7 +190,7 @@ src/expr.rs      numbers with SI suffixes, expression parser/evaluator
 src/solver.rs    MNA matrix, LU (real + complex)
 src/devices.rs   device models and stamps
 src/netlist.rs   parser, subcircuit flattening, models, built-in library
-src/sim.rs       OP / DC / AC / transient, .step orchestration
+src/sim.rs       OP / DC / AC / noise / transient, .step orchestration
 src/measure.rs   .meas and plot expressions
 src/gui/         app shell, schematic model + netlister, canvas editor, waveform viewer,
                  recovery copies + recent files (session.rs)
@@ -195,8 +207,9 @@ cargo test --release
 
 ## Accuracy against ngspice
 
-`tests/reference/` has 32 netlists (RC/RLC filters, rectifiers, BJT/MOSFET/JFET/VDMOS stages
-and switches, CMOS logic, TI op-amp circuits, oscillators, `.dc` sweeps, `.step`, temperature)
+`tests/reference/` has 39 netlists (RC/RLC filters, rectifiers, BJT/MOSFET/JFET/VDMOS stages
+and switches, CMOS logic, TI op-amp circuits, oscillators, `.dc` sweeps, `.step`, temperature,
+`.noise` of resistors, diode, BJT, MOSFET for each `NLEV`, JFET and VDMOS)
 and a script that runs each one in ngspice and in SwiftSim and compares every node voltage
 and source current both report:
 
@@ -208,7 +221,7 @@ python3 -I tests/reference/compare.py        # -v lists every signal; names sele
 It needs `ngspice` on PATH (Arch `pacman -S ngspice`, Debian/Ubuntu `apt install ngspice`)
 and only the Python standard library. Tolerances: `.op`/`.dc` 1e-6 relative at every point
 (both run with reltol=1e-9), `.tran` 1% of each signal's range, `.ac` 0.1 dB and 1°,
-oscillators by period. The remaining known differences are listed at the top of `compare.py`.
+`.noise` spectra and integrated totals 0.1 dB (they agree within 0.03 dB), oscillators by period. The remaining known differences are listed at the top of `compare.py`.
 
 ## License
 

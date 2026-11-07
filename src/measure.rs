@@ -166,7 +166,7 @@ fn part(words: &[&str]) -> Part {
 /// targets another analysis type.
 pub fn measure(line: &str, p: &Plot, prior: &[(String, String, f64)], global: &HashMap<String, f64>) -> Result<Option<(String, f64)>, String> {
     let mut words: Vec<&str> = line.split_whitespace().skip(1).collect();
-    let kinds = [("tran", PlotKind::Tran), ("ac", PlotKind::Ac), ("dc", PlotKind::Dc), ("op", PlotKind::Op)];
+    let kinds = [("tran", PlotKind::Tran), ("ac", PlotKind::Ac), ("dc", PlotKind::Dc), ("op", PlotKind::Op), ("noise", PlotKind::Noise)];
     if let Some(&(_, k)) = kinds.iter().find(|(n, _)| words.first() == Some(n)) {
         if k != p.kind {
             return Ok(None);

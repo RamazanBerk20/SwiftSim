@@ -562,3 +562,56 @@ fn diffusion_charge_history_is_step_independent() {
         assert!((t - 1.0629e-6).abs() < 0.3e-9, "tmax={tmax}: crossing at {t}");
     }
 }
+
+/// Boltzmann constant · temperature at 27 °C (CODATA 2014, as the engine).
+const KT: f64 = 1.38064852e-23 * 300.15;
+const QE: f64 = 1.6021766208e-19;
+
+#[test]
+fn divider_thermal_noise() {
+    let r = sim("n\nV1 in 0 DC 1 AC 1\nR1 in out 3k\nR2 out 0 1k\n.noise V(out) V1 dec 5 10 100k\n");
+    let p = &r.plots[0];
+    let rp = 3e3 * 1e3 / 4e3;
+    for k in 0..p.x.len() {
+        close(sig(p, "v(onoise)")[k], (4.0 * KT * rp).sqrt(), 1e-6);
+        // input-referred: divided by the divider gain 1/4
+        close(sig(p, "v(inoise)")[k], 4.0 * (4.0 * KT * rp).sqrt(), 1e-6);
+        // each resistor's share, R1: 4kT/R1 · (R1||R2)²
+        close(sig(p, "v(r1)")[k], (4.0 * KT / 3e3).sqrt() * rp, 1e-6);
+    }
+    assert!(r.log.iter().any(|l| l.starts_with("Total output noise:")), "{:?}", r.log);
+}
+
+#[test]
+fn rc_noise_integrates_to_kt_over_c() {
+    let r = sim("n\nV1 in 0 AC 1\nR1 in out 10k\nC1 out 0 1n\n.noise V(out) V1 dec 20 1 100g\n");
+    let p = &r.plots[0];
+    let tot = swiftsim::sim::integrate_psd(&p.x, sig(p, "v(onoise)"));
+    close(tot, KT / 1e-9, 1e-3);
+}
+
+#[test]
+fn bjt_ce_input_noise_matches_textbook() {
+    // e_n² = 4kT·Rs + 2q·Ib·Rs² + (2q·Ic + 4kT/RC)·((Rs + rπ)/(gm·rπ))²
+    let net = "ce\nVCC vcc 0 10\nVIN in 0 DC 0.7 AC 1\nRS in b 1k\nRC vcc c 5k\nQ1 c b 0 QT\n.model QT NPN(IS=1e-15 BF=100)\n";
+    let op = sim(&format!("{net}.op\n"));
+    let (ic, ib) = (sig(&op.plots[0], "ic(q1)")[0], sig(&op.plots[0], "ib(q1)")[0]);
+    let r = sim(&format!("{net}.noise V(c) VIN dec 2 1k 100k\n"));
+    let p = &r.plots[0];
+    let gm = ic / (KT / QE);
+    let rpi = 100.0 / gm;
+    let (rs, rc) = (1e3, 5e3);
+    let en2 = 4.0 * KT * rs + 2.0 * QE * ib * rs * rs + (2.0 * QE * ic + 4.0 * KT / rc) * ((rs + rpi) / (gm * rpi)).powi(2);
+    for &v in sig(p, "v(inoise)") {
+        close(v, en2.sqrt(), 1e-4);
+    }
+}
+
+#[test]
+fn flicker_noise_rises_as_one_over_f() {
+    // diode at 1 mA with KF: below the corner the density falls 10 dB per decade
+    let r = sim("d\nI1 0 a DC 1m AC 1\nD1 a 0 DX\n.model DX D(IS=1e-14 KF=1e-12 AF=1)\n.noise V(a) I1 dec 1 1 100\n");
+    let p = &r.plots[0];
+    let v = sig(p, "v(onoise)");
+    close(v[0] / v[1], 10f64.sqrt(), 1e-3);
+}

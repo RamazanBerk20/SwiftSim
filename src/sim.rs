@@ -1,7 +1,7 @@
-//! Analyses: operating point, DC sweep, AC, transient (adaptive trapezoidal
+//! Analyses: operating point, DC sweep, AC, noise, transient (adaptive trapezoidal
 //! with LTE control and breakpoints), plus `.step` and `.meas` orchestration.
 
-use crate::devices::{Device, LoadCtx};
+use crate::devices::{Device, LoadCtx, Noise};
 use crate::expr::fmt_si;
 use crate::netlist::{Analysis, Deck};
 use crate::solver::{C64, Matrix};
@@ -39,6 +39,8 @@ pub struct Circuit {
     pub nstate: usize,
     pub ics: Vec<(usize, f64)>,
     pub opts: Options,
+    /// Circuit temperature, kelvin.
+    pub temp: f64,
     pub nonlinear: bool,
     pub warnings: Vec<String>,
 }
@@ -49,6 +51,8 @@ pub enum PlotKind {
     Dc,
     Ac,
     Tran,
+    /// Noise densities (V/√Hz) versus frequency.
+    Noise,
 }
 
 /// One analysis run (one `.step` point): a sweep variable and signals.
@@ -125,6 +129,7 @@ pub fn run(deck: &Deck, ctl: &Control) -> Result<SimResult, String> {
                     res.log.push(format!("{n:>30} = {}{}", fmt_si(v[0]), if n.contains("impedance") { "Ω" } else { "" }));
                 }
             }
+            Analysis::Noise { .. } => res.log.extend(noise_report(&plots[0], &label)),
             Analysis::Tran { .. } => {
                 for l in &deck.four {
                     match crate::measure::fourier(&l.text, &plots[0], &global) {
@@ -161,6 +166,41 @@ fn op_report(p: &Plot, label: &str) -> Vec<String> {
     for (n, v) in p.names.iter().zip(&p.re) {
         let unit = if n.starts_with('v') { "V" } else { "A" };
         out.push(format!("{n:>20} = {}{unit}", fmt_si(v[0])));
+    }
+    out
+}
+
+/// ∫ v(f)² df over the sweep, each interval taken as a power law between its end points
+/// (SPICE's noise integration): total power, V².
+pub fn integrate_psd(f: &[f64], v: &[f64]) -> f64 {
+    f.windows(2)
+        .zip(v.windows(2))
+        .map(|(f, v)| {
+            let (s0, s1) = (v[0] * v[0], v[1] * v[1]);
+            if s0 <= 0.0 || s1 <= 0.0 || f[0] <= 0.0 {
+                return (s0 + s1) / 2.0 * (f[1] - f[0]);
+            }
+            let r = (f[1] / f[0]).ln();
+            let e = (s1 / s0).ln() / r + 1.0;
+            if e.abs() < 1e-10 { s0 * f[0] * r } else { s0 * f[0] / e * ((f[1] / f[0]).powf(e) - 1.0) }
+        })
+        .sum()
+}
+
+/// Integrated output / input noise and each part's share of the output noise.
+fn noise_report(p: &Plot, label: &str) -> Vec<String> {
+    let (lo, hi) = (fmt_si(p.x[0]), fmt_si(p.x[p.x.len() - 1]));
+    let tot = |k: usize| integrate_psd(&p.x, &p.re[k]);
+    let on = tot(0);
+    let mut out = vec![
+        format!("--- Noise {}({lo}Hz to {hi}Hz) ---", if label.is_empty() { String::new() } else { format!("{label} ") }),
+        format!("Total output noise: {}V rms", fmt_si(on.sqrt())),
+        format!("Total input-referred noise: {}V rms", fmt_si(tot(1).sqrt())),
+    ];
+    let mut parts: Vec<(f64, &str)> = (2..p.names.len()).map(|k| (tot(k), p.names[k].as_str())).collect();
+    parts.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (v, n) in parts.into_iter().filter(|(v, _)| *v > 0.0) {
+        out.push(format!("{:>20}: {}V rms ({:.3}%)", n.trim_start_matches("v(").trim_end_matches(')'), fmt_si(v.sqrt()), 100.0 * v / on));
     }
     out
 }
@@ -383,13 +423,12 @@ impl Engine {
             Analysis::Ac(f) => self.ac(f, prog, step).map(|p| vec![p]),
             &Analysis::Tran { tstep, tstop, tstart, tmax, uic } => self.tran(tstep, tstop, tstart, tmax, uic, prog, step).map(|p| vec![p]),
             Analysis::Tf { cur, a, b, src } => self.tf(*cur, a, b, src, step).map(|p| vec![p]),
+            Analysis::Noise { out, refn, src, freqs } => self.noise(out, refn, src, freqs, prog, step).map(|p| vec![p]),
         }
     }
 
-    /// Small-signal solve at angular frequency `w` around the operating point,
-    /// driven by the sources' AC values plus 1 A injected into node `inj.0`
-    /// and drawn from `inj.1`.
-    fn ac_solve(&self, m: &mut Matrix<C64>, w: f64, inj: (usize, usize), x: &mut [C64]) -> Result<(), usize> {
+    /// Small-signal matrix at angular frequency `w` around the operating point (RHS: AC sources).
+    fn ac_load(&self, m: &mut Matrix<C64>, w: f64) {
         m.clear();
         for d in &self.c.devices {
             d.load_ac(m, &self.x, w, &self.st);
@@ -399,6 +438,13 @@ impl Engine {
                 m.add(i, i, C64::from(self.c.opts.gmin));
             }
         }
+    }
+
+    /// Small-signal solve at angular frequency `w` around the operating point,
+    /// driven by the sources' AC values plus 1 A injected into node `inj.0`
+    /// and drawn from `inj.1`.
+    fn ac_solve(&self, m: &mut Matrix<C64>, w: f64, inj: (usize, usize), x: &mut [C64]) -> Result<(), usize> {
+        self.ac_load(m, w);
         m.i(inj.1, inj.0, C64::from(1.0));
         m.solve(x)
     }
@@ -462,6 +508,72 @@ impl Engine {
         };
         let names = vec!["transfer_function".to_string(), format!("{src}#input_impedance"), format!("output_impedance_at_{out}")];
         Ok(Plot { kind: PlotKind::Op, xname: "tf".into(), x: vec![0.0], names, re: vec![vec![gain], vec![zin], vec![zout]], im: vec![], step: step.into() })
+    }
+
+    /// `.noise`: output noise density of V(out, refn) and each part's contribution, by the
+    /// adjoint method: one solve of the transposed small-signal system per frequency gives the
+    /// transfer from every noise current (and from the input source) to the output.
+    fn noise(&mut self, out: &str, refn: &str, src: &str, freqs: &[f64], prog: &Prog, step: &str) -> Result<Plot, String> {
+        self.op(&Mode::dc(false), true)?;
+        let idx = |n: String| self.c.names.iter().position(|s| *s == n).map(|i| i + 1);
+        let node = |n: &str| if matches!(n, "" | "0" | "gnd") { Some(0) } else { idx(format!("v({n})")) };
+        let op = node(out).ok_or(format!(".noise: unknown node '{out}'"))?;
+        let on = node(refn).ok_or(format!(".noise: unknown node '{refn}'"))?;
+        let ksrc = idx(format!("i({src})"));
+        let d = self.c.devices.iter_mut().find(|d| d.name() == src).ok_or(format!(".noise: unknown source '{src}'"))?;
+        // the forward right-hand side is never used, so the source's AC value doesn't matter
+        let (sa, sb) = d.set_ac(C64::from(1.0)).ok_or(format!(".noise: '{src}' is not an independent source"))?;
+        // generators grouped by part (internal series resistors `Q1#rb` count for Q1)
+        let (mut parts, mut gens): (Vec<String>, Vec<(usize, Noise)>) = (vec![], vec![]);
+        let mut buf = vec![];
+        for d in &self.c.devices {
+            d.noise(&self.x, &self.st, self.c.temp, &mut buf);
+            if buf.is_empty() {
+                continue;
+            }
+            let name = d.name().split('#').next().unwrap_or_default();
+            let k = parts.iter().position(|p| p == name).unwrap_or_else(|| {
+                parts.push(name.to_string());
+                parts.len() - 1
+            });
+            gens.extend(buf.drain(..).map(|g| (k, g)));
+        }
+        let n = self.c.n;
+        let (mut m, mut t) = (Matrix::<C64>::new(n), Matrix::<C64>::new(n));
+        let mut y = vec![C64::default(); n + 1];
+        let mut names = vec!["v(onoise)".to_string(), "v(inoise)".to_string()];
+        names.extend(parts.iter().map(|p| format!("v({p})")));
+        let mut p = Plot { kind: PlotKind::Noise, xname: "frequency".into(), x: vec![], re: vec![vec![]; names.len()], names, im: vec![], step: step.into() };
+        let mut dev = vec![0.0; parts.len()];
+        for (fi, &f) in freqs.iter().enumerate() {
+            prog.check()?;
+            self.ac_load(&mut m, 2.0 * std::f64::consts::PI * f);
+            m.transpose_into(&mut t);
+            t.rhs(op, C64::from(1.0));
+            t.rhs(on, C64::from(-1.0));
+            t.solve(&mut y).map_err(|k| format!(".noise: singular matrix at {} (f={})", self.c.names[k - 1], fmt_si(f)))?;
+            // unit input: a voltage source drives its branch row, a current source flows sa → sb
+            let gain = match ksrc {
+                Some(k) => y[k],
+                None => y[sb] - y[sa],
+            }
+            .norm()
+            .max(1e-10); // ngspice's N_MINGAIN (on gain²)
+            dev.fill(0.0);
+            for (k, g) in &gens {
+                let h = y[g.b] - y[g.a];
+                dev[*k] += (h.re * h.re + h.im * h.im) * g.psd(f);
+            }
+            let tot = dev.iter().sum::<f64>().sqrt();
+            p.x.push(f);
+            p.re[0].push(tot);
+            p.re[1].push(tot / gain);
+            for (col, v) in p.re[2..].iter_mut().zip(&dev) {
+                col.push(v.sqrt());
+            }
+            prog.set((fi + 1) as f64 / freqs.len() as f64);
+        }
+        Ok(p)
     }
 
     fn set_src(&mut self, name: &str, v: f64) -> Result<(), String> {

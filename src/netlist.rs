@@ -59,6 +59,8 @@ pub enum Analysis {
     Tran { tstep: f64, tstop: f64, tstart: f64, tmax: f64, uic: bool },
     /// `.tf V(a[,b]) src` or `.tf I(vx) src`: output (current?, node/source, ref node).
     Tf { cur: bool, a: String, b: String, src: String },
+    /// `.noise V(out[,ref]) src dec|oct|lin n fstart fstop`.
+    Noise { out: String, refn: String, src: String, freqs: Vec<f64> },
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +88,9 @@ pub struct Deck {
     /// `.lib`/`.include` files skipped because they are vendor-encrypted.
     pub encrypted: Vec<String>,
 }
+
+/// SiO2 permittivity, F/m (3.9·ε0, as ngspice's noise models).
+const EPS_OX: f64 = 3.9 * 8.854214871e-12;
 
 /// Generic parts available without `.model` lines. Values are typical
 /// datasheet-level approximations.
@@ -488,7 +493,7 @@ impl Deck {
             }
             match first.as_str() {
                 ".param" | ".params" => self.params.extend(param_list(after_words(&l.text, 1))),
-                ".op" | ".tran" | ".ac" | ".dc" | ".tf" => {
+                ".op" | ".tran" | ".ac" | ".dc" | ".tf" | ".noise" => {
                     if self.analysis.is_none() {
                         self.analysis = Some(l);
                     } else {
@@ -574,10 +579,21 @@ impl Deck {
     }
 
     pub fn analysis(&self, sc: &Scope) -> Result<Analysis, String> {
-        let l = self.analysis.as_ref().ok_or("no analysis command: add .op, .tran, .ac, .dc or .tf")?;
+        let l = self.analysis.as_ref().ok_or("no analysis command: add .op, .tran, .ac, .dc, .tf or .noise")?;
         let toks = tokenize(&l.text);
         let e = |s: &str| eval_str(s, sc).map_err(|er| format!("line {}: {er}", l.no));
         let tk = |i: usize| toks.get(i).map(|s| s.as_str()).ok_or(format!("line {}: incomplete '{}'", l.no, l.text));
+        // frequency sweep `dec|oct|lin <points> <fstart> <fstop>` starting at token `i`
+        let freqs = |i: usize| -> Result<Vec<f64>, String> {
+            let kind = tk(i)?;
+            let (n, f1, f2) = (e(tk(i + 1)?)?, e(tk(i + 2)?)?, e(tk(i + 3)?)?);
+            if kind == "lin" {
+                let n = n.max(1.0) as usize;
+                Ok((0..n).map(|i| if n == 1 { f1 } else { f1 + (f2 - f1) * i as f64 / (n - 1) as f64 }).collect())
+            } else {
+                sweep(kind, f1, f2, n).map_err(|er| format!("line {}: {er}", l.no))
+            }
+        };
         Ok(match toks[0].as_str() {
             ".op" => Analysis::Op,
             ".tran" => {
@@ -597,16 +613,15 @@ impl Deck {
                 }
                 Analysis::Tran { tstep, tstop, tstart, tmax, uic }
             }
-            ".ac" => {
-                let kind = tk(1)?;
-                let (n, f1, f2) = (e(tk(2)?)?, e(tk(3)?)?, e(tk(4)?)?);
-                let f = if kind == "lin" {
-                    let n = n.max(1.0) as usize;
-                    (0..n).map(|i| if n == 1 { f1 } else { f1 + (f2 - f1) * i as f64 / (n - 1) as f64 }).collect()
-                } else {
-                    sweep(kind, f1, f2, n).map_err(|er| format!("line {}: {er}", l.no))?
+            ".ac" => Analysis::Ac(freqs(1)?),
+            ".noise" => {
+                let t: Vec<&str> = toks[1..].iter().map(|s| s.as_str()).collect();
+                let (out, refn, src, at) = match t[..] {
+                    ["v", "(", a, ")", src, ..] => (a, "", src, 6),
+                    ["v", "(", a, b, ")", src, ..] => (a, b, src, 7),
+                    _ => return Err(format!("line {}: expected .noise V(out[,ref]) <source> dec|oct|lin <points> <fstart> <fstop>", l.no)),
                 };
-                Analysis::Ac(f)
+                Analysis::Noise { out: out.into(), refn: refn.into(), src: src.into(), freqs: freqs(at)? }
             }
             ".dc" => {
                 let args: Vec<&String> = toks[1..].iter().filter(|t| t.as_str() != "lin").collect();
@@ -946,6 +961,7 @@ impl Deck {
             out_nodes,
             ics,
             opts,
+            temp: b.temp,
             warnings: b.warnings,
         })
     }
@@ -1234,6 +1250,8 @@ impl Builder<'_> {
                     nbv: g(&["nbv"], n)?,
                     fc: g(&["fc"], 0.5)?,
                     vt: VT,
+                    kf: g(&["kf"], 0.0)?,
+                    af: g(&["af"], 1.0)?,
                 };
                 md.set_temp(self.temp, self.tnom, g(&["eg"], 1.11)?, g(&["xti"], 3.0)?);
                 let a = self.series(&name, "a", nd[0], g(&["rs"], 0.0)? / area);
@@ -1269,6 +1287,8 @@ impl Builder<'_> {
                     tr: g(&["tr"], 0.0)?,
                     fc: g(&["fc"], 0.5)?,
                     vt: VT,
+                    kf: g(&["kf"], 0.0)?,
+                    af: g(&["af"], 1.0)?,
                 };
                 md.set_temp(self.temp, self.tnom, g(&["eg"], 1.11)?, g(&["xti", "pt"], 3.0)?, g(&["xtb"], 0.0)?);
                 let c = self.series(&name, "c", nd[0], g(&["rc"], 0.0)? / area);
@@ -1302,6 +1322,11 @@ impl Builder<'_> {
                         cbd: 0.0,
                         cbs: 0.0,
                         ksub: g(&["ksubthres"], 0.0)?,
+                        kf: g(&["kf"], 0.0)?,
+                        af: g(&["af"], 1.0)?,
+                        // ngspice (and SPICE3 with W = L = 1): kf·|Id|^af / (f·Cox²), Cox at TOX = 100 nm
+                        fden: (EPS_OX / 1e-7).powi(2),
+                        fgm: false,
                     };
                     // shortcut: VDMOS only scales KP with temperature (VTO fixed, no Vtotc/Bex)
                     let beta = g(&["kp"], 1.0)? * mult * (self.temp / self.tnom).powf(-1.5);
@@ -1320,6 +1345,8 @@ impl Builder<'_> {
                         nbv: g(&["nbv"], n)?,
                         fc: 0.5,
                         vt: VT,
+                        kf: 0.0,
+                        af: 1.0,
                     };
                     dm.set_temp(self.temp, self.tnom, g(&["eg"], 1.11)?, g(&["xti"], 3.0)?);
                     let (an, ca) = if pol > 0.0 { (s, d) } else { (d, s) };
@@ -1351,6 +1378,20 @@ impl Builder<'_> {
                         cbd: g(&["cbd"], 0.0)?,
                         cbs: g(&["cbs"], 0.0)?,
                         ksub: 0.0,
+                        kf: g(&["kf"], 0.0)?,
+                        af: g(&["af"], 1.0)?,
+                        fden: 0.0,
+                        fgm: false,
+                    };
+                    // flicker noise denominator by ngspice's NLEV; without NLEV the SPICE3 form
+                    // kf·|Id|^af / (f·W·L·Cox²) (ngspice's own default is NLEV=2)
+                    let cox = EPS_OX / if tox > 0.0 { tox } else { 1e-7 };
+                    let mf = mult.powf(md.af - 1.0); // m·kf·|Id/m|^af
+                    (md.fden, md.fgm) = match g(&["nlev"], -1.0)? as i32 {
+                        0 => (l * l * cox * mf, false),
+                        1 => (w * l * cox * mf, false),
+                        2 | 3 => (mult * w * l * cox, true),
+                        _ => (w * l * cox * cox * mf, false),
                     };
                     md.set_temp(self.temp, self.tnom);
                     let beta = md.kp * w / l * mult * (self.temp / self.tnom).powf(-1.5);
@@ -1376,13 +1417,13 @@ impl Builder<'_> {
                 let di = self.series(&name, "d", nd[0], g(&["rd"], 0.0)? / area);
                 let si = self.series(&name, "s", nd[2], g(&["rs"], 0.0)? / area);
                 // SPICE uses VTO unsigned for both polarities; Mos multiplies it by pol
-                let md = MosModel { pol, vto: pol * g(&["vto", "vt0"], -2.0)?, kp: 0.0, gamma: 0.0, phi: 0.6, lambda: g(&["lambda"], 0.0)?, cgs: 0.0, cgd: 0.0, cbd: 0.0, cbs: 0.0, ksub: 0.0 };
+                let md = MosModel { pol, vto: pol * g(&["vto", "vt0"], -2.0)?, kp: 0.0, gamma: 0.0, phi: 0.6, lambda: g(&["lambda"], 0.0)?, cgs: 0.0, cgd: 0.0, cbd: 0.0, cbs: 0.0, ksub: 0.0, kf: g(&["kf"], 0.0)?, af: g(&["af"], 1.0)?, fden: 1.0, fgm: false };
                 let beta = 2.0 * g(&["beta"], 1e-4)? * area;
                 let ch = Mos { name: name.clone(), d: di, g: gt, s: si, b: si, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0, bulk: vec![] };
                 let (temp, tnom) = (self.temp, self.tnom);
                 // gate junctions scale with temperature like diodes; channel VTO/BETA stay fixed (SPICE3)
                 let junction = |tag: &str, ch: usize, c: f64| -> Result<Diode, String> {
-                    let mut md = DiodeModel { is: g(&["is"], 1e-14)? * area, n: g(&["n"], 1.0)?, cjo: c * area, vj: g(&["pb"], 1.0)?, m: g(&["m"], 0.5)?, tt: 0.0, bv: f64::INFINITY, ibv: 1e-3, nbv: 1.0, fc: g(&["fc"], 0.5)?, vt: VT };
+                    let mut md = DiodeModel { is: g(&["is"], 1e-14)? * area, n: g(&["n"], 1.0)?, cjo: c * area, vj: g(&["pb"], 1.0)?, m: g(&["m"], 0.5)?, tt: 0.0, bv: f64::INFINITY, ibv: 1e-3, nbv: 1.0, fc: g(&["fc"], 0.5)?, vt: VT, kf: 0.0, af: 1.0 };
                     md.set_temp(temp, tnom, g(&["eg"], 1.11)?, g(&["xti"], 3.0)?);
                     let (a, k) = if pol > 0.0 { (gt, ch) } else { (ch, gt) };
                     Ok(Diode { name: format!("{name}#{tag}"), a, k, md, s: 0, vd_old: 0.0 })

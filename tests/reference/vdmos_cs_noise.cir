@@ -1,0 +1,13 @@
+* VDMOS common-source stage noise: channel thermal + flicker, RD/RS/RG and load thermal
+* CGDMAX = CGDMIN: SwiftSim's VDMOS Cgd is constant (README), ngspice's follows Vgd
+* no model RG: ngspice's VDMOS gate resistance is noiseless, SwiftSim's has thermal noise
+.include models.inc
+.model MNZ VDMOS(VTO=3 KP=20 LAMBDA=0.01 RD=10m RS=10m CGDMAX=300p CGDMIN=300p CGS=1.5n
++ IS=1e-12 N=1.1 RB=5m CJO=1n VJ=0.8 M=0.4 TT=100n BV=100 IBV=250u KSUBTHRES=0.1 KF=1e-24 AF=1)
+VDD vdd 0 24
+VG gs 0 DC 3.2 AC 1
+RG gs g 100
+RL vdd d 10
+M1 d g 0 MNZ
+.noise V(d) VG dec 10 1 1g
+.end

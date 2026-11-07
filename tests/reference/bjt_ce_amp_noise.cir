@@ -1,0 +1,4 @@
+* Common-emitter amplifier noise: collector/base shot, base flicker, RB/RC and resistor thermal
+.include bjt_ce_amp.inc
+.noise V(out) VIN dec 10 1 1g
+.end
