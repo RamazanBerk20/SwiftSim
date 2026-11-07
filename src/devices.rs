@@ -12,6 +12,8 @@ use std::collections::HashMap;
 /// Boltzmann constant over electron charge, V/K (CODATA 2014, the values ngspice uses;
 /// SPICE3's 1.3806226e-23/1.6021918e-19 shifts junction currents by ~3e-4).
 pub const KOQ: f64 = 1.38064852e-23 / 1.6021766208e-19;
+/// Electron charge, C (CODATA 2014, as ngspice).
+pub const Q: f64 = 1.6021766208e-19;
 /// Thermal voltage kT/q at 27 °C.
 pub const VT: f64 = KOQ * 300.15;
 /// SPICE reference temperature for the bandgap and junction formulas (27 °C).
@@ -87,6 +89,30 @@ impl Setup {
     }
 }
 
+/// Noise current generator between nodes `a` and `b` with power spectral density
+/// `white + flicker / f^ef` (A²/Hz). Generators are uncorrelated.
+pub struct Noise {
+    pub a: usize,
+    pub b: usize,
+    pub white: f64,
+    pub flicker: f64,
+    pub ef: f64,
+}
+
+impl Noise {
+    pub fn psd(&self, f: f64) -> f64 {
+        if self.flicker > 0.0 { self.white + self.flicker / f.powf(self.ef) } else { self.white }
+    }
+    /// Thermal noise 4kT·g of conductance `g` at `temp` kelvin.
+    fn thermal(a: usize, b: usize, g: f64, temp: f64) -> Noise {
+        Noise { a, b, white: 4.0 * KOQ * Q * temp * g.abs(), flicker: 0.0, ef: 1.0 }
+    }
+    /// Shot noise 2q|i| plus flicker kf·|i|^af / f.
+    fn shot(a: usize, b: usize, i: f64, kf: f64, af: f64) -> Noise {
+        Noise { a, b, white: 2.0 * Q * i.abs(), flicker: kf * i.abs().powf(af), ef: 1.0 }
+    }
+}
+
 pub trait Device: Send {
     fn name(&self) -> &str;
     fn setup(&mut self, _s: &mut Setup) {}
@@ -110,6 +136,8 @@ pub trait Device: Send {
     fn set_ac(&mut self, _v: C64) -> Option<(usize, usize)> {
         None
     }
+    /// Noise generators at operating point `x`, circuit temperature `temp` (kelvin).
+    fn noise(&self, _x: &[f64], _st: &[f64], _temp: f64, _out: &mut Vec<Noise>) {}
     fn current_names(&self) -> Vec<String>;
     fn currents(&self, x: &[f64], st: &[f64]) -> Vec<f64>;
     fn ac_currents(&self, x: &[f64], v: &[C64], w: f64, st: &[f64]) -> Vec<C64>;
@@ -264,6 +292,9 @@ impl Device for Resistor {
     }
     fn load_ac(&self, m: &mut Matrix<C64>, _x: &[f64], _w: f64, _st: &[f64]) {
         m.g(self.a, self.b, C64::from(1.0 / self.r));
+    }
+    fn noise(&self, _x: &[f64], _st: &[f64], temp: f64, out: &mut Vec<Noise>) {
+        out.push(Noise::thermal(self.a, self.b, 1.0 / self.r, temp));
     }
     fn current_names(&self) -> Vec<String> {
         vec![format!("i({})", self.name)]
@@ -954,6 +985,9 @@ pub struct DiodeModel {
     pub fc: f64,
     /// Thermal voltage at the device temperature.
     pub vt: f64,
+    /// Flicker noise coefficient and current exponent.
+    pub kf: f64,
+    pub af: f64,
 }
 
 impl DiodeModel {
@@ -1042,6 +1076,10 @@ impl Device for Diode {
         let (_, gd, _, cap) = self.eval(x[self.a] - x[self.k], 0.0);
         m.g(self.a, self.k, C64::new(gd, w * cap));
     }
+    fn noise(&self, x: &[f64], _st: &[f64], _temp: f64, out: &mut Vec<Noise>) {
+        let id = self.eval(x[self.a] - x[self.k], 0.0).0;
+        out.push(Noise::shot(self.a, self.k, id, self.md.kf, self.md.af));
+    }
     fn current_names(&self) -> Vec<String> {
         vec![format!("i({})", self.name)]
     }
@@ -1083,6 +1121,9 @@ pub struct BjtModel {
     pub fc: f64,
     /// Thermal voltage at the device temperature.
     pub vt: f64,
+    /// Base-current flicker noise coefficient and exponent.
+    pub kf: f64,
+    pub af: f64,
 }
 
 impl BjtModel {
@@ -1239,6 +1280,12 @@ impl Device for Bjt {
         m.g(b, e, jw(w, o.cbe));
         m.g(b, c, jw(w, o.cbc));
     }
+    /// Collector and base shot noise, base flicker noise (RB/RC/RE are separate resistors).
+    fn noise(&self, x: &[f64], _st: &[f64], _temp: f64, out: &mut Vec<Noise>) {
+        let (o, _, _) = self.op_at(x);
+        out.push(Noise::shot(self.c, self.e, o.ic, 0.0, 1.0));
+        out.push(Noise::shot(self.b, self.e, o.ib, self.md.kf, self.md.af));
+    }
     fn current_names(&self) -> Vec<String> {
         ["ic", "ib", "ie"].iter().map(|p| format!("{p}({})", self.name)).collect()
     }
@@ -1276,6 +1323,11 @@ pub struct MosModel {
     pub cbs: f64,
     /// VDMOS subthreshold slope KSUBTHRES (V); 0 = hard cutoff.
     pub ksub: f64,
+    /// Flicker noise: kf·|Id|^af / (f·fden), or kf·gm² / (f^af·fden) when `fgm` (ngspice NLEV 2/3).
+    pub kf: f64,
+    pub af: f64,
+    pub fden: f64,
+    pub fgm: bool,
 }
 
 impl MosModel {
@@ -1313,7 +1365,7 @@ pub struct Mos {
 pub fn mos_junction(name: String, a: usize, k: usize, is: f64, t: f64, tnom: f64) -> Diode {
     let vt = KOQ * t;
     let is = is * (egap(tnom) / (KOQ * tnom) - egap(t) / vt).exp();
-    let md = DiodeModel { is, n: 1.0, cjo: 0.0, vj: 1.0, m: 0.5, tt: 0.0, bv: f64::INFINITY, ibv: 1e-3, nbv: 1.0, fc: 0.5, vt };
+    let md = DiodeModel { is, n: 1.0, cjo: 0.0, vj: 1.0, m: 0.5, tt: 0.0, bv: f64::INFINITY, ibv: 1e-3, nbv: 1.0, fc: 0.5, vt, kf: 0.0, af: 1.0 };
     Diode { name, a, k, md, s: 0, vd_old: 0.0 }
 }
 
@@ -1435,6 +1487,20 @@ impl Device for Mos {
             j.load_ac(m, x, w, st);
         }
     }
+    /// Channel thermal noise 8/3·kT·gm and flicker noise (RD/RS are separate resistors;
+    /// like SPICE, the bulk junctions are noiseless).
+    fn noise(&self, x: &[f64], _st: &[f64], temp: f64, out: &mut Vec<Noise>) {
+        let (vgs, vds, vbs) = self.raw(x);
+        let ((dn, sn), _, (ids, gm, ..)) = self.bias(vgs, vds, vbs);
+        let md = &self.md;
+        let mut n = Noise::thermal(dn, sn, 2.0 / 3.0 * gm, temp);
+        if md.fgm {
+            (n.flicker, n.ef) = (md.kf * gm * gm / md.fden, md.af);
+        } else {
+            n.flicker = md.kf * ids.abs().powf(md.af) / md.fden;
+        }
+        out.push(n);
+    }
     fn current_names(&self) -> Vec<String> {
         ["id", "ig", "is"].iter().map(|p| format!("{p}({})", self.name)).collect()
     }
@@ -1514,6 +1580,10 @@ impl Device for Jfet {
         self.ch.load_ac(m, x, w, st);
         self.gs.load_ac(m, x, w, st);
         self.gd.load_ac(m, x, w, st);
+    }
+    /// Channel noise only: SPICE leaves the gate junctions noiseless.
+    fn noise(&self, x: &[f64], st: &[f64], temp: f64, out: &mut Vec<Noise>) {
+        self.ch.noise(x, st, temp, out);
     }
     fn current_names(&self) -> Vec<String> {
         ["id", "ig", "is"].iter().map(|p| format!("{p}({})", self.name)).collect()

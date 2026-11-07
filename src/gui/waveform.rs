@@ -1,5 +1,5 @@
 //! Waveform viewer: traces from expressions, stepped runs, Bode plots,
-//! FFT, two cursors with readout, CSV export.
+//! noise spectra (log-log), FFT, two cursors with readout, CSV export.
 
 use eframe::egui;
 use egui::{Color32, RichText};
@@ -215,6 +215,9 @@ impl WaveView {
                         let b = lx.iter().zip(&v).map(|(x, z)| PlotPoint::new(*x, z.arg_deg())).collect();
                         (a, b)
                     })
+                } else if p.kind == PlotKind::Noise {
+                    swiftsim::measure::eval_trace(p, &t.expr)
+                        .map(|v| (p.x.iter().zip(&v).map(|(x, y)| PlotPoint::new(x.log10(), y.abs().max(1e-300).log10())).collect(), vec![]))
                 } else {
                     swiftsim::measure::eval_trace(p, &t.expr).map(|v| {
                         let pts: Vec<PlotPoint> = p.x.iter().zip(&v).map(|(x, y)| PlotPoint::new(*x, *y)).collect();
@@ -312,14 +315,17 @@ impl WaveView {
             self.rebuild(res);
         }
 
-        let logx = kind == Some(PlotKind::Ac) || (self.fft && kind == Some(PlotKind::Tran));
+        // noise: log frequency and log density axes, like LTspice
+        let logy = kind == Some(PlotKind::Noise);
+        let logx = logy || kind == Some(PlotKind::Ac) || (self.fft && kind == Some(PlotKind::Tran));
+        let fy = move |y: f64| if logy { 10f64.powf(y) } else { y };
         let xname = res.plots[0].xname.clone();
         let xunit = match kind {
             Some(PlotKind::Tran) if !self.fft => "s",
             _ if logx => "Hz",
             _ => "",
         };
-        let unit_of = move |e: &str| if logx { "dB" } else if is_current(e) { "A" } else { "V" };
+        let unit_of = move |e: &str| if logy { "V/√Hz" } else if logx { "dB" } else if is_current(e) { "A" } else { "V" };
         let fmt_x = move |x: f64| if logx { format!("{}{xunit}", fmt_si(10f64.powf(x))) } else { format!("{}{xunit}", fmt_si(x)) };
         let readout_h = if self.c1.is_some() || self.c2.is_some() { 24.0 + 20.0 * self.traces.len().min(6) as f32 } else { 0.0 };
         // claim exactly the remaining area; plots live in a child so they can never grow the panel
@@ -332,6 +338,8 @@ impl WaveView {
         let (has_v, has_i) = (vis().any(|t| !is_current(&t.expr)), vis().any(|t| is_current(&t.expr)));
         let panes: Vec<(Pane, &'static str, f32)> = if kind == Some(PlotKind::Ac) {
             vec![(Pane::All, "dB", 0.62), (Pane::Phase, "°", 0.38)]
+        } else if logy {
+            vec![(Pane::All, "V/√Hz", 1.0)]
         } else if logx {
             vec![(Pane::All, "dB", 1.0)]
         } else if has_v && has_i {
@@ -349,18 +357,21 @@ impl WaveView {
                 .legend(egui_plot::Legend::default())
                 .link_axis(link, [true, false])
                 .link_cursor(link, [true, false])
-                .y_axis_formatter(move |m, _| format!("{}{unit}", fmt_si(m.value)))
+                .y_axis_formatter(move |m, _| format!("{}{unit}", fmt_si(fy(m.value))))
                 .x_axis_formatter(move |m, _| fmt_x(m.value))
                 .label_formatter(move |h: &HoverPosition| {
                     Some(match h {
                         HoverPosition::NearDataPoint { plot_name, position, .. } => {
-                            format!("{plot_name}\n{}\n{}{unit}", fmt_x(position.x), fmt_si(position.y))
+                            format!("{plot_name}\n{}\n{}{unit}", fmt_x(position.x), fmt_si(fy(position.y)))
                         }
-                        HoverPosition::Elsewhere { position } => format!("{}\n{}{unit}", fmt_x(position.x), fmt_si(position.y)),
+                        HoverPosition::Elsewhere { position } => format!("{}\n{}{unit}", fmt_x(position.x), fmt_si(fy(position.y))),
                     })
                 });
             if logx {
                 p = p.x_grid_spacer(log_spacer);
+            }
+            if logy {
+                p = p.y_grid_spacer(log_spacer);
             }
             p
         };
@@ -420,7 +431,7 @@ impl WaveView {
                     let t = &self.traces[s.trace];
                     let name = if s.step.is_empty() { t.expr.clone() } else { format!("{} [{}]", t.expr, s.step) };
                     ui.colored_label(t.color, name);
-                    let (y1, y2) = (c1.and_then(|x| interp(&s.a, x)), c2.and_then(|x| interp(&s.a, x)));
+                    let (y1, y2) = (c1.and_then(|x| interp(&s.a, x)).map(fy), c2.and_then(|x| interp(&s.a, x)).map(fy));
                     let yunit = unit_of(&t.expr);
                     let f = |y: Option<f64>| y.map_or("—".into(), |v| format!("{}{yunit}", fmt_si(v)));
                     ui.label(f(y1));

@@ -296,7 +296,11 @@ impl App {
                             }
                             self.tab = Tab::Log;
                         } else {
-                            if self.waves.traces.is_empty() && self.mode == Mode::Schematic {
+                            if kind == Some(PlotKind::Noise) {
+                                if !self.waves.traces.iter().any(|t| t.expr.to_ascii_lowercase().contains("noise")) {
+                                    self.waves.add("V(onoise)");
+                                }
+                            } else if self.waves.traces.is_empty() && self.mode == Mode::Schematic {
                                 let labels: Vec<String> = self.ed.sch.comps.iter().filter(|c| c.kind == Kind::Label).map(|c| format!("V({})", c.value.trim())).collect();
                                 for l in labels.into_iter().take(4) {
                                     self.waves.add(&l);
@@ -480,7 +484,7 @@ impl App {
                     });
                 }
                 ui.separator();
-                ui.label("Supported: .op .tran .ac .dc .tf .four .temp .step .meas .param .ic .model .subckt .include/.lib .options");
+                ui.label("Supported: .op .tran .ac .dc .tf .noise .four .temp .step .meas .param .ic .model .subckt .include/.lib .options");
                 ui.label("Elements: R C L K V I D Q M(level1/VDMOS) E F G H B S X");
             });
         });
@@ -725,7 +729,11 @@ impl App {
                     ui.checkbox(&mut f.uic, "initial conditions (UIC)");
                     ui.end_row();
                 }
-                1 => {
+                1 | 5 => {
+                    if f.kind == 5 {
+                        field(ui, "Output", &mut f.out);
+                        field(ui, "Input source", &mut f.src);
+                    }
                     ui.label("Sweep");
                     egui::ComboBox::from_id_salt("acs").selected_text(&f.d).show_ui(ui, |ui| {
                         for s in ["dec", "oct", "lin"] {
@@ -755,6 +763,9 @@ impl App {
         }
         if f.kind == 4 {
             ui.weak("Small-signal gain, input and output impedance; results in the Log.");
+        }
+        if f.kind == 5 {
+            ui.weak("V(onoise), V(inoise) and each part's contribution in V/√Hz; integrated totals in the Log.");
         }
         if f.kind != before.kind {
             let src = self.ed.sch.comps.iter().find(|c| c.kind == Kind::Voltage).map_or("V1".to_string(), |c| c.spice_name());
@@ -842,7 +853,12 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.confirm = Some(Pending::Quit);
         }
-        if let Some(sig) = self.ed.probe.take() {
+        if let Some(mut sig) = self.ed.probe.take() {
+            // after .noise a part's probe shows its noise contribution, V(<part>)
+            let noise = self.results.as_ref().and_then(|r| r.plots.first()).is_some_and(|p| p.kind == PlotKind::Noise);
+            if let Some((_, r)) = sig.split_once('(').filter(|(h, _)| noise && !h.eq_ignore_ascii_case("v")) {
+                sig = format!("V({r}");
+            }
             self.waves.add(&sig);
             self.tab = Tab::Waves;
         }
@@ -930,10 +946,10 @@ fn lib_setting() -> Option<PathBuf> {
 
 fn is_analysis(l: &str) -> bool {
     let w = l.trim().to_ascii_lowercase();
-    [".tran", ".ac", ".dc", ".op", ".tf"].iter().any(|k| w == *k || w.starts_with(&format!("{k} ")))
+    [".tran", ".ac", ".dc", ".op", ".tf", ".noise"].iter().any(|k| w == *k || w.starts_with(&format!("{k} ")))
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Default)]
 struct SimForm {
     kind: usize,
     a: String,
@@ -941,19 +957,23 @@ struct SimForm {
     c: String,
     d: String,
     uic: bool,
+    /// Noise: output and input source.
+    out: String,
+    src: String,
 }
 
 impl SimForm {
-    const KINDS: [&str; 5] = ["Transient", "AC analysis", "DC sweep", "Operating point", "DC transfer function"];
+    const KINDS: [&str; 6] = ["Transient", "AC analysis", "DC sweep", "Operating point", "DC transfer function", "Noise"];
 
     fn parse(line: &str) -> SimForm {
         let t: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
         let g = |i: usize| t.get(i).cloned().unwrap_or_default();
         match t.first().map(|s| s.to_ascii_lowercase()).as_deref() {
-            Some(".ac") => SimForm { kind: 1, d: g(1), a: g(2), b: g(3), c: g(4), uic: false },
-            Some(".dc") => SimForm { kind: 2, d: g(1), a: g(2), b: g(3), c: g(4), uic: false },
-            Some(".op") => SimForm { kind: 3, a: String::new(), b: String::new(), c: String::new(), d: String::new(), uic: false },
-            Some(".tf") => SimForm { kind: 4, a: g(1), d: g(2), b: String::new(), c: String::new(), uic: false },
+            Some(".ac") => SimForm { kind: 1, d: g(1), a: g(2), b: g(3), c: g(4), ..Default::default() },
+            Some(".dc") => SimForm { kind: 2, d: g(1), a: g(2), b: g(3), c: g(4), ..Default::default() },
+            Some(".op") => SimForm { kind: 3, ..Default::default() },
+            Some(".tf") => SimForm { kind: 4, a: g(1), d: g(2), ..Default::default() },
+            Some(".noise") => SimForm { kind: 5, out: g(1), src: g(2), d: g(3), a: g(4), b: g(5), c: g(6), ..Default::default() },
             Some(".tran") => {
                 let uic = t.iter().any(|s| s.eq_ignore_ascii_case("uic"));
                 let n: Vec<String> = t[1..].iter().filter(|s| !s.eq_ignore_ascii_case("uic")).cloned().collect();
@@ -962,9 +982,9 @@ impl SimForm {
                     1 => (n[0].clone(), String::new(), String::new()),
                     _ => (n[1].clone(), n.get(2).cloned().unwrap_or_default(), n.get(3).cloned().unwrap_or_default()),
                 };
-                SimForm { kind: 0, a: stop, b: start, c: max, d: String::new(), uic }
+                SimForm { kind: 0, a: stop, b: start, c: max, uic, ..Default::default() }
             }
-            _ => SimForm { kind: 0, a: "10m".into(), b: String::new(), c: String::new(), d: String::new(), uic: false },
+            _ => SimForm { kind: 0, a: "10m".into(), ..Default::default() },
         }
     }
 
@@ -972,12 +992,13 @@ impl SimForm {
         let s = |v: &str| v.to_string();
         let (a, b, c, d) = match kind {
             0 => (s("10m"), s(""), s(""), s("")),
-            1 => (s("100"), s("1"), s("1meg"), s("dec")),
+            1 | 5 => (s("100"), s("1"), s("1meg"), s("dec")),
             2 => (s("0"), s("5"), s("0.1"), s(src)),
             4 => (s("V(out)"), s(""), s(""), s(src)),
             _ => (s(""), s(""), s(""), s("")),
         };
-        SimForm { kind, a, b, c, d, uic: false }
+        let (out, src) = if kind == 5 { (s("V(out)"), s(src)) } else { (s(""), s("")) };
+        SimForm { kind, a, b, c, d, out, src, uic: false }
     }
 
     fn line(&self) -> String {
@@ -999,6 +1020,15 @@ impl SimForm {
             1 => format!(".ac {} {} {} {}", or(&self.d, "dec"), or(&self.a, "100"), or(&self.b, "1"), or(&self.c, "1meg")),
             2 => format!(".dc {} {} {} {}", or(&self.d, "V1"), or(&self.a, "0"), or(&self.b, "5"), or(&self.c, "0.1")),
             4 => format!(".tf {} {}", or(&self.a, "V(out)"), or(&self.d, "V1")),
+            5 => format!(
+                ".noise {} {} {} {} {} {}",
+                or(&self.out, "V(out)"),
+                or(&self.src, "V1"),
+                or(&self.d, "dec"),
+                or(&self.a, "100"),
+                or(&self.b, "1"),
+                or(&self.c, "1meg")
+            ),
             _ => ".op".into(),
         }
     }
@@ -1259,5 +1289,7 @@ mod tests {
         assert_eq!(super::SimForm::defaults(1, "V1").line(), ".ac dec 100 1 1meg");
         assert_eq!(super::SimForm::defaults(2, "Vin").line(), ".dc Vin 0 5 0.1");
         assert_eq!(super::SimForm::parse(".tf V(out) Vin").line(), ".tf V(out) Vin");
+        assert_eq!(super::SimForm::parse(".noise V(out) Vin oct 10 10 100k").line(), ".noise V(out) Vin oct 10 10 100k");
+        assert_eq!(super::SimForm::defaults(5, "Vin").line(), ".noise V(out) Vin dec 100 1 1meg");
     }
 }

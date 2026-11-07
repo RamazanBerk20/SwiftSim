@@ -1,0 +1,7 @@
+* Forward-biased diode: shot + flicker noise against the bias resistor and RS thermal noise
+.include models.inc
+V1 vcc 0 DC 5 AC 1
+R1 vcc a 4.7k
+D1 a 0 DSIG
+.noise V(a) V1 dec 10 0.1 1g
+.end

@@ -1,0 +1,18 @@
+* Level-1 NMOS common-source amplifier noise: channel thermal and flicker for NLEV 0, 1, 2
+* (no TOX: both use Cox at 100 nm for the flicker term, and ngspice would add Meyer caps)
+.include models.inc
+.param nl=0
+.model NMN NMOS(LEVEL=1 VTO=0.6 KP=120u GAMMA=0.45 PHI=0.8 LAMBDA=0.05 CGSO=0.3n CGDO=0.3n
++ KF=1e-28 AF=1.2 NLEV={nl})
+VDD vdd 0 5
+VIN in 0 DC 0 AC 1
+Rsig in a 10k
+CIN a g 1u
+R1 vdd g 300k
+R2 g 0 100k
+RD vdd d 10k
+M1 d g 0 0 NMN W=200u L=2u
+CL d 0 1p
+.step param nl list 0 1 2
+.noise V(d) VIN dec 10 1 1g
+.end

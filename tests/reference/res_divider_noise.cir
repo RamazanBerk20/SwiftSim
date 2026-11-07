@@ -1,0 +1,9 @@
+* Resistor divider thermal noise at 85 C: sqrt(4kT*(R1||R2)) at the output
+V1 in 0 DC 1 AC 1
+R1 in out 3k
+R2 out 0 1k
+R3 out x 2.2k
+R4 x 0 4.7k
+.temp 85
+.noise V(out) V1 dec 5 10 100k
+.end

@@ -1,0 +1,12 @@
+* N-JFET common-source amplifier, self-biased: channel thermal + flicker, RD/RS thermal
+.include models.inc
+VDD vdd 0 15
+VIN in 0 DC 0 AC 1
+CIN in g 1u
+RG g 0 1meg
+RD vdd d 2.2k
+RS s 0 220
+CS s 0 100u
+J1 d g s NJ
+.noise V(d) VIN dec 10 1 1g
+.end
