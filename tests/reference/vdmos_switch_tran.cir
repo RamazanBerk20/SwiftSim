@@ -1,0 +1,12 @@
+* VDMOS low-side switch with gate resistor, pulse drive
+* CGDMAX = CGDMIN: SwiftSim's VDMOS Cgd is constant (README), ngspice's follows Vgd between the two
+.include models.inc
+.model MSW VDMOS(VTO=3 KP=20 LAMBDA=0.01 RD=10m RS=10m RG=3 CGDMAX=300p CGDMIN=300p CGS=1.5n
++ IS=1e-12 N=1.1 RB=5m CJO=1n VJ=0.8 M=0.4 TT=100n BV=100 IBV=250u KSUBTHRES=0.1)
+VDD vdd 0 12
+RL vdd d 10
+VG gs 0 PULSE(0 10 1u 10n 10n 4u 10u)
+RG gs g 10
+M1 d g 0 MSW
+.tran 1n 12u 0 2n
+.end

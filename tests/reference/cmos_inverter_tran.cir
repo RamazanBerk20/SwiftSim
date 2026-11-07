@@ -1,0 +1,15 @@
+* Three CMOS inverters with load capacitors, pulse input
+.include models.inc
+VDD vdd 0 3.3
+VIN in 0 PULSE(0 3.3 1n 0.2n 0.2n 4n 10n)
+MN1 n1 in 0 0 NM W=2u L=1u
+MP1 n1 in vdd vdd PM W=5u L=1u
+C1 n1 0 50f
+MN2 n2 n1 0 0 NM W=2u L=1u
+MP2 n2 n1 vdd vdd PM W=5u L=1u
+C2 n2 0 50f
+MN3 n3 n2 0 0 NM W=2u L=1u
+MP3 n3 n2 vdd vdd PM W=5u L=1u
+C3 n3 0 50f
+.tran 0.01n 20n 0 0.01n
+.end

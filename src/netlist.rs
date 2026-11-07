@@ -1301,10 +1301,11 @@ impl Builder<'_> {
                         cgd: cgd * mult,
                         cbd: 0.0,
                         cbs: 0.0,
+                        ksub: g(&["ksubthres"], 0.0)?,
                     };
                     // shortcut: VDMOS only scales KP with temperature (VTO fixed, no Vtotc/Bex)
                     let beta = g(&["kp"], 1.0)? * mult * (self.temp / self.tnom).powf(-1.5);
-                    self.devs.push(Box::new(Mos { name: name.clone(), d: di, g: gi, s: si, b: si, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0 }));
+                    self.devs.push(Box::new(Mos { name: name.clone(), d: di, g: gi, s: si, b: si, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0, bulk: vec![] }));
                     let bv = g(&["bv"], 0.0)?;
                     let n = g(&["n"], 1.0)?;
                     let mut dm = DiodeModel {
@@ -1349,12 +1350,21 @@ impl Builder<'_> {
                         cgd: g(&["cgdo"], 0.0)? * w * mult + g(&["cgd"], 0.0)?,
                         cbd: g(&["cbd"], 0.0)?,
                         cbs: g(&["cbs"], 0.0)?,
+                        ksub: 0.0,
                     };
                     md.set_temp(self.temp, self.tnom);
                     let beta = md.kp * w / l * mult * (self.temp / self.tnom).powf(-1.5);
                     let di = self.series(&name, "d", d, g(&["rd"], 0.0)?);
                     let si = self.series(&name, "s", s, g(&["rs"], 0.0)?);
-                    self.devs.push(Box::new(Mos { name, d: di, g: gt, s: si, b, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0 }));
+                    // shortcut: bulk junctions use IS only (no JS·AD/AS area scaling, no N)
+                    let is = g(&["is"], 1e-14)? * mult;
+                    let (temp, tnom) = (self.temp, self.tnom);
+                    let junction = |tag: &str, ch: usize| {
+                        let (a, k) = if md.pol > 0.0 { (b, ch) } else { (ch, b) };
+                        mos_junction(format!("{name}#{tag}"), a, k, is, temp, tnom)
+                    };
+                    let bulk = vec![junction("bd", di), junction("bs", si)];
+                    self.devs.push(Box::new(Mos { name, d: di, g: gt, s: si, b, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0, bulk }));
                 }
             }
             'j' => {
@@ -1366,9 +1376,9 @@ impl Builder<'_> {
                 let di = self.series(&name, "d", nd[0], g(&["rd"], 0.0)? / area);
                 let si = self.series(&name, "s", nd[2], g(&["rs"], 0.0)? / area);
                 // SPICE uses VTO unsigned for both polarities; Mos multiplies it by pol
-                let md = MosModel { pol, vto: pol * g(&["vto", "vt0"], -2.0)?, kp: 0.0, gamma: 0.0, phi: 0.6, lambda: g(&["lambda"], 0.0)?, cgs: 0.0, cgd: 0.0, cbd: 0.0, cbs: 0.0 };
+                let md = MosModel { pol, vto: pol * g(&["vto", "vt0"], -2.0)?, kp: 0.0, gamma: 0.0, phi: 0.6, lambda: g(&["lambda"], 0.0)?, cgs: 0.0, cgd: 0.0, cbd: 0.0, cbs: 0.0, ksub: 0.0 };
                 let beta = 2.0 * g(&["beta"], 1e-4)? * area;
-                let ch = Mos { name: name.clone(), d: di, g: gt, s: si, b: si, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0 };
+                let ch = Mos { name: name.clone(), d: di, g: gt, s: si, b: si, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0, bulk: vec![] };
                 let (temp, tnom) = (self.temp, self.tnom);
                 // gate junctions scale with temperature like diodes; channel VTO/BETA stay fixed (SPICE3)
                 let junction = |tag: &str, ch: usize, c: f64| -> Result<Diode, String> {

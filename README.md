@@ -68,8 +68,8 @@ On Windows the same commands produce `swiftsim.exe` (no console window in releas
   `.include` / `.lib` (incl. sections)
 - Elements: R, C (Rser/Rpar, IC), L (Rser, IC), K (mutual coupling), V/I with DC, AC,
   PULSE, SIN/SINE, EXP, PWL, SFFM (V: Rser), D (junction caps, breakdown/zener),
-  Q (Gummel-Poon DC, junction/diffusion charge, RB/RC/RE), M (level 1 and LTSpice VDMOS
-  with body diode), J (NJF/PJF JFET: VTO, BETA, LAMBDA, IS, N, RD, RS, CGS, CGD, PB, M, FC),
+  Q (Gummel-Poon DC, junction/diffusion charge, RB/RC/RE), M (level 1 with bulk junction
+  diodes, LTSpice VDMOS with body diode and `KSUBTHRES`), J (NJF/PJF JFET: VTO, BETA, LAMBDA, IS, N, RD, RS, CGS, CGD, PB, M, FC),
   E/F/G/H incl. `POLY(n)`, E/G `value={…}` and `table=(…)` / `TABLE {expr}=(…)`,
   B (behavioral V=/I= with `V()`, `I()`, `time`, `if()`, math), S (voltage switch with
   hysteresis), X (subcircuits)
@@ -151,6 +151,9 @@ Being explicit, since the goal is LTSpice parity:
 - Devices: MESFET, transmission lines (T/O), current-controlled switch (W),
   MOSFET levels above 1 / BSIM (they run with level-1 equations and a warning in the Log),
   LTSpice digital/XSPICE `A` devices, E/G `laplace=`
+- BJT: `XTF`/`VTF`/`ITF` (bias-dependent transit time) are ignored, and the `TF` charge is not
+  divided by qb as in SPICE3 (storage times ~0.3% longer when `VAF`/`IKF` are set)
+- Level-1 MOSFET bulk junctions take `IS` only (no `JS`·`AD`/`AS` area scaling)
 - JFET extras: gate recombination current (ISR/NR), impact ionization (ALPHA/VK), the
   B (doping tail) parameter and noise parameters are ignored
 - `.func` functions are not visible in `.meas` expressions
@@ -176,11 +179,29 @@ tests/engine.rs  analytic checks (RC/RL/LC, AC, diodes, BJT, MOS, JFET, POLY/tab
 tests/models/    public vendor macromodels used by the tests
 assets/          app icon (SVG source, PNGs, .ico; render.sh regenerates them)
 packaging/       Linux .desktop/MIME/install.sh/AppImage script, Windows installer
+tests/reference/ accuracy suite against ngspice (compare.py + netlists)
 ```
 
 ```bash
 cargo test --release
 ```
+
+## Accuracy against ngspice
+
+`tests/reference/` has 32 netlists (RC/RLC filters, rectifiers, BJT/MOSFET/JFET/VDMOS stages
+and switches, CMOS logic, TI op-amp circuits, oscillators, `.dc` sweeps, `.step`, temperature)
+and a script that runs each one in ngspice and in SwiftSim and compares every node voltage
+and source current both report:
+
+```bash
+cargo build --release
+python3 -I tests/reference/compare.py        # -v lists every signal; names select a subset
+```
+
+It needs `ngspice` on PATH (Arch `pacman -S ngspice`, Debian/Ubuntu `apt install ngspice`)
+and only the Python standard library. Tolerances: `.op`/`.dc` 1e-6 relative at every point
+(both run with reltol=1e-9), `.tran` 1% of each signal's range, `.ac` 0.1 dB and 1°,
+oscillators by period. The remaining known differences are listed at the top of `compare.py`.
 
 ## License
 

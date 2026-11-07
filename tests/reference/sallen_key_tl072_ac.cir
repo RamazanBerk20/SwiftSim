@@ -1,0 +1,12 @@
+* Unity-gain Sallen-Key low-pass with TI TL072, AC
+.include ../models/TL072.301
+Vp vp 0 15
+Vn vn 0 -15
+V1 in 0 DC 0 AC 1
+R1 in a 10k
+R2 a b 10k
+C1 a out 22n
+C2 b 0 10n
+X1 b out vp vn out TL072
+.ac dec 20 10 10meg
+.end

@@ -1,0 +1,4 @@
+* Common-emitter amplifier, 10 mV 1 kHz sine
+.include bjt_ce_amp.inc
+.tran 10u 3m 0 5u
+.end

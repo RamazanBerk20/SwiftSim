@@ -1,0 +1,7 @@
+* Series RLC band-pass, AC (f0 = 5.03 kHz, Q = 6.3)
+V1 in 0 DC 0 AC 1
+L1 in a 10m
+C1 a out 100n
+R1 out 0 50
+.ac dec 50 100 100k
+.end

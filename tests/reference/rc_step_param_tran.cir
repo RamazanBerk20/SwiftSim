@@ -1,0 +1,8 @@
+* RC step response, .step over the capacitor value
+.param cval=10n
+V1 in 0 PULSE(0 1 0 1u 1u 1 2)
+R1 in out 10k
+C1 out 0 {cval}
+.step param cval list 10n 47n 100n
+.tran 1u 5m 0 5u
+.end

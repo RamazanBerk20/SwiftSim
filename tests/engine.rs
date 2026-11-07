@@ -334,7 +334,7 @@ fn jfet_square_law_and_gate() {
     let r = sim(&format!("jg\n{m}Ig 0 g 1m\nJ1 0 g 0 jn\n.op\n"));
     let p = &r.plots[0];
     close(sig(p, "ig(j1)")[0], 1e-3, 1e-6);
-    close(sig(p, "v(g)")[0], 0.025864186 * (1e-3f64 / 2e-15).ln(), 2e-3);
+    close(sig(p, "v(g)")[0], swiftsim::devices::VT * (1e-3f64 / 2e-15).ln(), 2e-3);
     // AC gate current through Cgs(Vgs=-1) + Cgd(Vgd=-6) depletion caps
     let r = sim(&format!("jac\n{m}Vd d 0 5\nVg g 0 -1 AC 1\nJ1 d g 0 jn\n.ac lin 1 1meg 1meg\n"));
     let p = &r.plots[0];
@@ -394,7 +394,7 @@ fn vendor_lm358_single_supply_and_inverting() {
 
 /// SPICE3 diode: Vd = vt·ln(I/Is(T) + 1), Is(T) = Is·exp((T/Tnom−1)·Eg/(n·vt))·(T/Tnom)^(Xti/n).
 fn diode_vd(t_c: f64, tnom_c: f64) -> f64 {
-    let koq = 1.3806226e-23 / 1.6021918e-19;
+    let koq = 1.38064852e-23 / 1.6021766208e-19;
     let (t, tn) = (t_c + 273.15, tnom_c + 273.15);
     let vt = koq * t;
     let is = 1e-14 * ((t / tn - 1.0) * 1.11 / vt).exp() * (t / tn).powi(3);
@@ -407,7 +407,7 @@ fn diode_forward_voltage_vs_temperature() {
     assert_eq!(r.plots.len(), 2);
     assert_eq!(r.plots[1].step, "temp=127");
     let (v27, v127) = (sig(&r.plots[0], "v(a)")[0], sig(&r.plots[1], "v(a)")[0]);
-    close(v27, 0.6550994, 1e-5);
+    close(v27, 0.6551179, 1e-5);
     close(v27, diode_vd(27.0, 27.0), 1e-5);
     close(v127, diode_vd(127.0, 27.0), 1e-5);
     let slope = (v127 - v27) / 100.0;
@@ -509,4 +509,56 @@ fn jfet_gate_junction_follows_temperature() {
     let (v27, v127) = (sig(&r.plots[0], "v(g)")[0], sig(&r.plots[1], "v(g)")[0]);
     let slope = (v127 - v27) / 100.0;
     assert!((-2.6e-3..-1.4e-3).contains(&slope), "dVgs/dT = {slope}");
+}
+
+// ---------------------------------------------------------------- found by tests/reference (ngspice)
+
+#[test]
+fn pulse_keeps_sub_ns_edges() {
+    // 0.2 ns edges stay 0.2 ns; only a zero edge gets the 1 ns default
+    let r = sim("p\nV1 a 0 PULSE(0 1 1n 0.2n 0.2n 4n 10n)\nV2 b 0 PULSE(0 1 1n 0 0 4n 10n)\nR1 a 0 1k\nR2 b 0 1k\n.tran 0.01n 10n\n");
+    let p = &r.plots[0];
+    close(at(p, "v(a)", 1.1e-9), 0.5, 1e-6);
+    close(at(p, "v(a)", 5.3e-9), 0.5, 1e-6);
+    close(at(p, "v(b)", 1.5e-9), 0.5, 1e-6);
+}
+
+#[test]
+fn level1_mosfet_bulk_junctions() {
+    // drain pulled below (NMOS) / above (PMOS) the bulk: the IS=1e-14 bulk-drain diode carries 1 mA
+    let vt = swiftsim::devices::VT;
+    let net = |temp: &str| sim(&format!("mb\n.model nm NMOS(vto=1 kp=1m)\n.model pm PMOS(vto=-1 kp=1m)\nI1 d 0 1m\nM1 d 0 0 0 nm\nI2 0 d2 1m\nM2 d2 0 0 0 pm\n{temp}\n.op\n"));
+    let p = &net("").plots[0];
+    close(sig(p, "v(d)")[0], -vt * (1e11f64 + 1.0).ln(), 1e-6);
+    close(sig(p, "id(m1)")[0], -1e-3, 1e-6);
+    close(sig(p, "v(d2)")[0], vt * (1e11f64 + 1.0).ln(), 1e-6);
+    close(sig(p, "id(m2)")[0], 1e-3, 1e-6);
+    // MOS1 temperature rule: IS(T) = IS·exp(Eg(Tnom)/vt(Tnom) − Eg(T)/vt(T))
+    let koq = 1.38064852e-23 / 1.6021766208e-19;
+    let eg = |t: f64| 1.16 - 7.02e-4 * t * t / (t + 1108.0);
+    let (t0, t1) = (300.15, 400.15);
+    let is = 1e-14 * (eg(t0) / (koq * t0) - eg(t1) / (koq * t1)).exp();
+    close(sig(&net(".temp 127").plots[0], "v(d)")[0], -koq * t1 * (1e-3 / is + 1.0).ln(), 1e-6);
+}
+
+#[test]
+fn vdmos_subthreshold_slope() {
+    // KSUBTHRES k: Vgst -> k·ln(1 + exp(Vgst/k)), so Id(Vgs = Vto) = Kp/2·(k·ln2)²·(1 + λVds); default k = 0 cuts off
+    let id = |k: &str| sig(&sim(&format!("v\nVd d 0 10\nVg g 0 3\nM1 d g 0 mv\n.model mv VDMOS(vto=3 kp=20 lambda=0.01 {k})\n.op\n")).plots[0], "id(m1)")[0];
+    close(id("ksubthres=0.1"), 10.0 * (0.1 * 2f64.ln()).powi(2) * 1.1, 1e-6);
+    assert!(id("").abs() < 1e-9);
+}
+
+#[test]
+fn diffusion_charge_history_is_step_independent() {
+    // diode reverse recovery (TT = 100 ns): v(a) crosses -2.5 V at 1.0629 µs (ngspice, converged).
+    // Charges kept from the pre-final Newton iterate made this drift by 1.5-2.6 ns with the step size.
+    for tmax in ["10n", "1n"] {
+        let r = sim(&format!("rr\n.model dt D(is=1e-14 tt=100n cjo=2p)\nV1 in 0 PULSE(5 -5 1u 10n 10n 5u 10u)\nR1 in a 1k\nD1 a 0 dt\n.tran 1n 3u 0 {tmax}\n"));
+        let p = &r.plots[0];
+        let v = sig(p, "v(a)");
+        let k = (1..v.len()).find(|&k| p.x[k] > 1.02e-6 && v[k] <= -2.5).unwrap();
+        let t = p.x[k - 1] + (-2.5 - v[k - 1]) * (p.x[k] - p.x[k - 1]) / (v[k] - v[k - 1]);
+        assert!((t - 1.0629e-6).abs() < 0.3e-9, "tmax={tmax}: crossing at {t}");
+    }
 }

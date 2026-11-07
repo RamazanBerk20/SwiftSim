@@ -1,0 +1,10 @@
+* Voltage-controlled switch with hysteresis (on above 3 V, off below 2 V)
+* (RC >= 10 us: with a faster RC ngspice's 1 us trapezoidal steps ring below 0 V after the switch flips)
+.include models.inc
+V1 c 0 PWL(0 0 1m 5 2m 0)
+VDD vdd 0 5
+RL vdd o 1k
+S1 o 0 c 0 SW1
+C1 o 0 1u
+.tran 1u 2m 0 1u
+.end

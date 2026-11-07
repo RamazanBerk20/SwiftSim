@@ -1,0 +1,4 @@
+* Common-emitter amplifier, operating point
+.include bjt_ce_amp.inc
+.op
+.end

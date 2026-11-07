@@ -1,0 +1,13 @@
+* Full-wave bridge rectifier from a floating source
+.include models.inc
+V1 a b SIN(0 12 60 0 0 0)
+Rs a a1 0.5
+D1 a1 p DPWR
+D2 b p DPWR
+D3 0 a1 DPWR
+D4 0 b DPWR
+Rb b 0 1meg
+C1 p 0 470u
+RL p 0 470
+.tran 0.1m 50m 0 20u
+.end

@@ -1,0 +1,11 @@
+* Non-inverting amplifier (gain 11) with TI LM358, AC: gain-bandwidth roll-off
+.include ../models/LM358.101
+Vp vp 0 5
+Vn vn 0 -5
+V1 in 0 DC 0 AC 1
+X1 in m vp vn out LM358
+Rf out m 100k
+Rg m 0 10k
+RL out 0 10k
+.ac dec 20 10 10meg
+.end

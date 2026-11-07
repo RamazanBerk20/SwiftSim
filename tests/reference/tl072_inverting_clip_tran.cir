@@ -1,0 +1,11 @@
+* TL072 inverting amplifier (gain -10) driven into clipping
+.include ../models/TL072.301
+Vp vp 0 15
+Vn vn 0 -15
+V1 in 0 SIN(0 2 1k 0 0 0)
+Rin in m 10k
+Rf m out 100k
+RL out 0 2k
+X1 0 m vp vn out TL072
+.tran 10u 2m 0 2u
+.end

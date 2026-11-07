@@ -1,0 +1,9 @@
+* N-JFET common-source stage, gate swept into forward conduction
+.include models.inc
+VDD vdd 0 15
+VG g 0 0
+RD vdd d 2.2k
+RS s 0 220
+J1 d g s NJ
+.dc VG -3 0.8 0.01
+.end

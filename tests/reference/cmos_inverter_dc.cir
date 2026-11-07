@@ -1,0 +1,8 @@
+* CMOS inverter voltage transfer curve
+.include models.inc
+VDD vdd 0 3.3
+VIN in 0 0
+MN out in 0 0 NM W=2u L=1u
+MP out in vdd vdd PM W=5u L=1u
+.dc VIN 0 3.3 0.01
+.end
