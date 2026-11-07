@@ -11,6 +11,28 @@ use std::collections::HashMap;
 
 /// Thermal voltage kT/q at 27 °C.
 pub const VT: f64 = 0.025864186;
+/// Boltzmann constant over electron charge (SPICE3 values), V/K.
+pub const KOQ: f64 = 1.3806226e-23 / 1.6021918e-19;
+/// SPICE reference temperature for the bandgap and junction formulas (27 °C).
+const TREF: f64 = 300.15;
+
+/// Silicon bandgap (eV) at `t` kelvin.
+fn egap(t: f64) -> f64 {
+    1.16 - 7.02e-4 * t * t / (t + 1108.0)
+}
+
+fn pbfact(t: f64) -> f64 {
+    -3.0 * KOQ * t * (t / TREF).ln() + egap(t) - t / TREF * egap(TREF)
+}
+
+/// Junction potential and zero-bias capacitance moved from `tnom` to `t`
+/// (kelvin), SPICE3 rules.
+pub fn junction_at(vj: f64, cj: f64, m: f64, t: f64, tnom: f64) -> (f64, f64) {
+    let pbo = (vj - pbfact(tnom)) * TREF / tnom;
+    let cj0 = cj / (1.0 + m * (4e-4 * (tnom - TREF) - (vj - pbo) / pbo));
+    let vjt = pbfact(t) + t / TREF * pbo;
+    (vjt, cj0 * (1.0 + m * (4e-4 * (t - TREF) - (vjt - pbo) / pbo)))
+}
 
 pub struct LoadCtx<'a> {
     /// Current Newton iterate, x[0] = ground = 0.
@@ -82,6 +104,10 @@ pub trait Device: Send {
     fn breakpoints(&self, _tstop: f64, _out: &mut Vec<f64>) {}
     fn set_dc(&mut self, _v: f64) -> bool {
         false
+    }
+    /// Independent sources: set the AC excitation and return the (n+, n-) nodes.
+    fn set_ac(&mut self, _v: C64) -> Option<(usize, usize)> {
+        None
     }
     fn current_names(&self) -> Vec<String>;
     fn currents(&self, x: &[f64], st: &[f64]) -> Vec<f64>;
@@ -550,6 +576,10 @@ impl Device for VSource {
         self.wave = None;
         true
     }
+    fn set_ac(&mut self, v: C64) -> Option<(usize, usize)> {
+        self.ac = v;
+        Some((self.a, self.b))
+    }
     fn current_names(&self) -> Vec<String> {
         vec![format!("i({})", self.name)]
     }
@@ -600,6 +630,10 @@ impl Device for ISource {
         self.dc = v;
         self.wave = None;
         true
+    }
+    fn set_ac(&mut self, v: C64) -> Option<(usize, usize)> {
+        self.ac = v;
+        Some((self.a, self.b))
     }
     fn current_names(&self) -> Vec<String> {
         vec![format!("i({})", self.name)]
@@ -912,6 +946,17 @@ pub struct DiodeModel {
     pub ibv: f64,
     pub nbv: f64,
     pub fc: f64,
+    /// Thermal voltage at the device temperature.
+    pub vt: f64,
+}
+
+impl DiodeModel {
+    /// Move IS, VJ and CJO from `tnom` to `t` (kelvin), SPICE3 rules.
+    pub fn set_temp(&mut self, t: f64, tnom: f64, eg: f64, xti: f64) {
+        self.vt = KOQ * t;
+        self.is *= ((t / tnom - 1.0) * eg / (self.n * self.vt)).exp() * (t / tnom).powf(xti / self.n);
+        (self.vj, self.cjo) = junction_at(self.vj, self.cjo, self.m, t, tnom);
+    }
 }
 
 pub struct Diode {
@@ -925,13 +970,13 @@ pub struct Diode {
 
 impl Diode {
     fn vcrit(&self) -> f64 {
-        let nvt = self.md.n * VT;
+        let nvt = self.md.n * self.md.vt;
         nvt * (nvt / (std::f64::consts::SQRT_2 * self.md.is)).ln()
     }
     /// (current, conductance, charge, capacitance)
     fn eval(&self, vd: f64, gmin: f64) -> (f64, f64, f64, f64) {
         let md = &self.md;
-        let nvt = md.n * VT;
+        let nvt = md.n * md.vt;
         let (mut id, mut gd);
         if vd >= -3.0 * nvt {
             let e = (vd / nvt).min(80.0).exp();
@@ -944,7 +989,7 @@ impl Diode {
             gd = md.is * 3.0 * a3 / vd;
         }
         if md.bv.is_finite() {
-            let bvt = md.nbv * VT;
+            let bvt = md.nbv * md.vt;
             let e = (-(md.bv + vd) / bvt).min(80.0).exp();
             id -= md.ibv * e;
             gd += md.ibv * e / bvt;
@@ -968,13 +1013,13 @@ impl Device for Diode {
     }
     fn load(&mut self, m: &mut Matrix<f64>, c: &LoadCtx, st: &mut [f64]) -> bool {
         let raw = c.x[self.a] - c.x[self.k];
-        let nvt = self.md.n * VT;
+        let nvt = self.md.n * self.md.vt;
         let vd = if c.init {
             self.vcrit()
         } else {
             let mut v = pnjlim(raw, self.vd_old, nvt, self.vcrit());
             if self.md.bv.is_finite() && v < (-self.md.bv + 10.0 * nvt).min(0.0) {
-                let bvt = self.md.nbv * VT;
+                let bvt = self.md.nbv * self.md.vt;
                 let vt = -(v + self.md.bv);
                 let vto = -(self.vd_old + self.md.bv);
                 v = -(pnjlim(vt, vto, bvt, self.vcrit()) + self.md.bv);
@@ -1030,9 +1075,28 @@ pub struct BjtModel {
     pub tf: f64,
     pub tr: f64,
     pub fc: f64,
+    /// Thermal voltage at the device temperature.
+    pub vt: f64,
 }
 
-/// Gummel-Poon DC + junction/diffusion charges (no temperature effects).
+impl BjtModel {
+    /// Move IS, ISE, ISC, BF, BR and the junctions from `tnom` to `t` (kelvin), SPICE3 rules.
+    pub fn set_temp(&mut self, t: f64, tnom: f64, eg: f64, xti: f64, xtb: f64) {
+        self.vt = KOQ * t;
+        let ratlog = (t / tnom).ln();
+        let factlog = (t / tnom - 1.0) * eg / self.vt + xti * ratlog;
+        let bfactor = (xtb * ratlog).exp();
+        self.is *= factlog.exp();
+        self.bf *= bfactor;
+        self.br *= bfactor;
+        self.ise *= (factlog / self.ne).exp() / bfactor;
+        self.isc *= (factlog / self.nc).exp() / bfactor;
+        (self.vje, self.cje) = junction_at(self.vje, self.cje, self.mje, t, tnom);
+        (self.vjc, self.cjc) = junction_at(self.vjc, self.cjc, self.mjc, t, tnom);
+    }
+}
+
+/// Gummel-Poon DC + junction/diffusion charges.
 pub struct Bjt {
     pub name: String,
     pub c: usize,
@@ -1059,14 +1123,14 @@ struct BjtOp {
 
 impl Bjt {
     fn vcrit(&self) -> f64 {
-        let nvt = self.md.nf * VT;
+        let nvt = self.md.nf * self.md.vt;
         nvt * (nvt / (std::f64::consts::SQRT_2 * self.md.is)).ln()
     }
     fn eval(&self, vbe: f64, vbc: f64, gmin: f64) -> BjtOp {
         let md = &self.md;
         let ex = |v: f64, n: f64| {
-            let e = (v / (n * VT)).min(80.0).exp();
-            (e - 1.0, e / (n * VT))
+            let e = (v / (n * md.vt)).min(80.0).exp();
+            (e - 1.0, e / (n * md.vt))
         };
         let (fe, fg) = ex(vbe, md.nf);
         let cbe = md.is * fe + gmin * vbe;
@@ -1145,8 +1209,8 @@ impl Device for Bjt {
             (self.vcrit(), 0.0)
         } else {
             let vc = self.vcrit();
-            let nvt = self.md.nf * VT;
-            (pnjlim(rbe, self.vbe_old, nvt, vc), pnjlim(rbc, self.vbc_old, self.md.nr * VT, vc))
+            let nvt = self.md.nf * self.md.vt;
+            (pnjlim(rbe, self.vbe_old, nvt, vc), pnjlim(rbc, self.vbc_old, self.md.nr * self.md.vt, vc))
         };
         self.vbe_old = vbe;
         self.vbc_old = vbc;
@@ -1204,6 +1268,19 @@ pub struct MosModel {
     pub cgd: f64,
     pub cbd: f64,
     pub cbs: f64,
+}
+
+impl MosModel {
+    /// Move VTO and PHI from `tnom` to `t` (kelvin), SPICE3 level-1 rules
+    /// (KP scales as (t/tnom)^-1.5 on the device's beta).
+    pub fn set_temp(&mut self, t: f64, tnom: f64) {
+        let (phit, _) = junction_at(self.phi, 0.0, 0.0, t, tnom);
+        let v0 = self.pol * self.vto;
+        let sq = |p: f64| p.max(0.1).sqrt(); // same floor as eval()
+        let v = v0 + self.gamma * (sq(phit) - sq(self.phi)) + 0.5 * (phit - self.phi) + self.pol * 0.5 * (egap(tnom) - egap(t));
+        self.vto = self.pol * v;
+        self.phi = phit;
+    }
 }
 
 /// Shichman-Hodges (SPICE level 1) MOSFET with constant capacitances.

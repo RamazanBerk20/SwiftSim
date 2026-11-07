@@ -20,11 +20,13 @@ pub struct Options {
     pub itl4: usize,
     pub trtol: f64,
     pub maxstep: f64,
+    /// Nominal temperature of model parameters, °C.
+    pub tnom: f64,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { reltol: 1e-3, abstol: 1e-12, vntol: 1e-6, gmin: 1e-12, itl1: 150, itl4: 25, trtol: 7.0, maxstep: 0.0 }
+        Options { reltol: 1e-3, abstol: 1e-12, vntol: 1e-6, gmin: 1e-12, itl1: 150, itl4: 25, trtol: 7.0, maxstep: 0.0, tnom: 27.0 }
     }
 }
 
@@ -115,8 +117,23 @@ pub fn run(deck: &Deck, ctl: &Control) -> Result<SimResult, String> {
         let mut eng = Engine::new(ckt);
         let prog = Prog { ctl, base: ci as f64 / total as f64, span: 1.0 / total as f64 };
         let plots = eng.analyze(&an, &prog, &label).map_err(|e| if label.is_empty() { e } else { format!("{e} (step {label})") })?;
-        if matches!(an, Analysis::Op) {
-            res.log.extend(op_report(&plots[0], &label));
+        match an {
+            Analysis::Op => res.log.extend(op_report(&plots[0], &label)),
+            Analysis::Tf { .. } => {
+                res.log.push(format!("--- Transfer function {label} ---"));
+                for (n, v) in plots[0].names.iter().zip(&plots[0].re) {
+                    res.log.push(format!("{n:>30} = {}{}", fmt_si(v[0]), if n.contains("impedance") { "Ω" } else { "" }));
+                }
+            }
+            Analysis::Tran { .. } => {
+                for l in &deck.four {
+                    match crate::measure::fourier(&l.text, &plots[0], &global) {
+                        Ok(lines) => res.log.extend(lines),
+                        Err(e) => res.log.push(format!("line {}: .four: {e}", l.no)),
+                    }
+                }
+            }
+            _ => {}
         }
         res.plots.extend(plots);
     }
@@ -355,7 +372,86 @@ impl Engine {
             Analysis::Dc(sw) => self.dc(sw, prog, step),
             Analysis::Ac(f) => self.ac(f, prog, step).map(|p| vec![p]),
             &Analysis::Tran { tstep, tstop, tstart, tmax, uic } => self.tran(tstep, tstop, tstart, tmax, uic, prog, step).map(|p| vec![p]),
+            Analysis::Tf { cur, a, b, src } => self.tf(*cur, a, b, src, step).map(|p| vec![p]),
         }
+    }
+
+    /// Small-signal solve at angular frequency `w` around the operating point,
+    /// driven by the sources' AC values plus 1 A injected into node `inj.0`
+    /// and drawn from `inj.1`.
+    fn ac_solve(&self, m: &mut Matrix<C64>, w: f64, inj: (usize, usize), x: &mut [C64]) -> Result<(), usize> {
+        m.clear();
+        for d in &self.c.devices {
+            d.load_ac(m, &self.x, w, &self.st);
+        }
+        for i in 1..=self.c.n {
+            if !self.c.is_current[i - 1] {
+                m.add(i, i, C64::from(self.c.opts.gmin));
+            }
+        }
+        m.i(inj.1, inj.0, C64::from(1.0));
+        m.solve(x)
+    }
+
+    /// `.tf`: DC small-signal gain, input and output impedance at the operating point.
+    fn tf(&mut self, cur: bool, a: &str, b: &str, src: &str, step: &str) -> Result<Plot, String> {
+        self.op(&Mode::dc(false), true)?;
+        let idx = |n: String| self.c.names.iter().position(|s| *s == n).map(|i| i + 1);
+        let node = |n: &str| if matches!(n, "" | "0" | "gnd") { Some(0) } else { idx(format!("v({n})")) };
+        let (op, on) = if cur {
+            (idx(format!("i({a})")).ok_or(format!(".tf: '{a}' is not a voltage source"))?, 0)
+        } else {
+            (node(a).ok_or(format!(".tf: unknown node '{a}'"))?, node(b).ok_or(format!(".tf: unknown node '{b}'"))?)
+        };
+        let ksrc = idx(format!("i({src})"));
+        let (mut sn, mut out_src) = (None, false);
+        for d in self.c.devices.iter_mut() {
+            if let Some(nodes) = d.set_ac(C64::default()) {
+                if d.name() == src {
+                    sn = Some(nodes);
+                }
+                out_src |= cur && d.name() == a;
+            }
+        }
+        let (sa, sb) = sn.ok_or(format!(".tf: '{src}' is not an independent source"))?;
+        if cur && !out_src {
+            return Err(format!(".tf: I({a}) needs an independent voltage source"));
+        }
+        let n = self.c.n;
+        let mut m = Matrix::<C64>::new(n);
+        let mut x = vec![C64::default(); n + 1];
+        let names = self.c.names.clone();
+        let sing = |k: usize| format!(".tf: singular matrix at {}", names[k - 1]);
+        let set = |eng: &mut Self, name: &str, v: f64| {
+            for d in eng.c.devices.iter_mut().filter(|d| d.name() == name) {
+                d.set_ac(C64::from(v));
+            }
+        };
+        // 1 V (or 1 A) at the input: gain and input impedance
+        set(self, src, 1.0);
+        self.ac_solve(&mut m, 0.0, (0, 0), &mut x).map_err(sing)?;
+        let gain = x[op].re - x[on].re;
+        let zin = match ksrc {
+            Some(k) => -1.0 / x[k].re,
+            None => x[sb].re - x[sa].re,
+        };
+        set(self, src, 0.0);
+        // output impedance: 1 A into the output node, or 1 V in the output source
+        let zout = if cur {
+            set(self, a, 1.0);
+            self.ac_solve(&mut m, 0.0, (0, 0), &mut x).map_err(sing)?;
+            -1.0 / x[op].re
+        } else {
+            self.ac_solve(&mut m, 0.0, (op, on), &mut x).map_err(sing)?;
+            x[op].re - x[on].re
+        };
+        let out = match (cur, b) {
+            (true, _) => format!("i({a})"),
+            (false, "") => format!("v({a})"),
+            _ => format!("v({a},{b})"),
+        };
+        let names = vec!["transfer_function".to_string(), format!("{src}#input_impedance"), format!("output_impedance_at_{out}")];
+        Ok(Plot { kind: PlotKind::Op, xname: "tf".into(), x: vec![0.0], names, re: vec![vec![gain], vec![zin], vec![zout]], im: vec![], step: step.into() })
     }
 
     fn set_src(&mut self, name: &str, v: f64) -> Result<(), String> {
@@ -404,16 +500,7 @@ impl Engine {
         for (fi, &f) in freqs.iter().enumerate() {
             prog.check()?;
             let w = 2.0 * std::f64::consts::PI * f;
-            mc.clear();
-            for d in &self.c.devices {
-                d.load_ac(&mut mc, &self.x, w, &st);
-            }
-            for i in 1..=n {
-                if !self.c.is_current[i - 1] {
-                    mc.add(i, i, C64::from(self.c.opts.gmin));
-                }
-            }
-            mc.solve(&mut xc).map_err(|k| format!("AC: singular matrix at {} (f={})", self.c.names[k - 1], fmt_si(f)))?;
+            self.ac_solve(&mut mc, w, (0, 0), &mut xc).map_err(|k| format!("AC: singular matrix at {} (f={})", self.c.names[k - 1], fmt_si(f)))?;
             p.x.push(f);
             let mut k = 0;
             for &(_, i) in &self.c.out_nodes {
