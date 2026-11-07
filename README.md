@@ -45,6 +45,7 @@ cargo build --release
 ./target/release/swiftsim my.sws           # open a schematic
 ./target/release/swiftsim my.cir           # open a SPICE netlist in the text editor
 ./target/release/swiftsim -b my.cir -o out.csv   # batch run, log + CSV export
+./target/release/swiftsim -b my.asc              # batch-run an LTspice schematic
 ```
 
 On Windows the same commands produce `swiftsim.exe` (no console window in release builds).
@@ -97,6 +98,8 @@ On Windows the same commands produce `swiftsim.exe` (no console window in releas
   `I(R1)*V(out)`), FFT, two cursors with Δ and 1/Δ readout, CSV export
 - `.op` voltages annotated on the schematic; Log shows OP tables, `.meas`, warnings
 - Netlist mode: edit and run any SPICE netlist directly (LTSpice `.net/.cir` files)
+- LTspice `.asc` import (File ▸ Open): stock symbols (R, C, L, diodes, sources, BJT, MOSFET,
+  JFET, E/G, switch, ideal opamp); other symbols are listed in the Log and left out
 - Dark / light theme; schematics saved as JSON (`.sws`)
 
 ### Keyboard
@@ -112,6 +115,29 @@ On Windows the same commands produce `swiftsim.exe` (no console window in releas
 
 Pan with middle or right drag, zoom with the wheel.
 
+### LTspice model library
+
+SwiftSim does not ship LTspice's model files, but it reads them from your LTspice install
+at run time. A model or subcircuit that is not in the netlist or SwiftSim's built-ins is
+looked up in LTspice's `lib/cmp/standard.dio`, `standard.bjt`, `standard.mos` and
+`standard.jft`; relative `.lib`/`.include` paths that don't exist next to the file are also
+tried in `lib/sub/` and `lib/cmp/`. Vendor-encrypted model files can't be simulated; they
+are named in the Log and in the error for the part that needs them.
+
+The `lib` folder is found automatically in the usual places:
+
+- Windows: `%LOCALAPPDATA%\LTspice\lib` (LTspice 24) or `Documents\LTspiceXVII\lib`
+- Linux (Wine): the same folders under `$WINEPREFIX` (default `~/.wine`)`/drive_c/users/$USER/`
+- macOS: `~/Library/Application Support/LTspice/lib`
+
+To use another folder, pick it under **Simulate ▸ Choose LTspice library folder…** (saved in
+`%APPDATA%\SwiftSim\ltspice-lib.txt` or `~/.config/swiftsim/ltspice-lib.txt`), or for batch runs
+set `SWIFTSIM_LTSPICE_LIB`:
+
+```bash
+SWIFTSIM_LTSPICE_LIB=~/.wine/drive_c/users/$USER/AppData/Local/LTspice/lib ./target/release/swiftsim -b my.asc
+```
+
 ## Not yet supported (compared with LTSpice)
 
 Being explicit, since the goal is LTSpice parity:
@@ -125,7 +151,7 @@ Being explicit, since the goal is LTSpice parity:
 - JFET extras: gate recombination current (ISR/NR), impact ionization (ALPHA/VK), the
   B (doping tail) parameter and noise parameters are ignored
 - `.func` functions are not visible in `.meas` expressions
-- Import of LTSpice `.asc` schematics and `.asy` symbols; hierarchical schematics; custom symbols
+- `.asc` import of non-stock `.asy` symbols (vendor parts, custom symbols); hierarchical schematics
 - Sparse matrix solver: the engine uses dense LU with sparse-aware elimination —
   fast up to a few hundred nodes, slow for multi-thousand-node netlists
 - VDMOS gate-drain capacitance is constant (LTSpice's is voltage-dependent); level-1

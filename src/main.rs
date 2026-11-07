@@ -35,8 +35,15 @@ fn main() {
 }
 
 fn batch(file: &str, out: Option<&str>) -> i32 {
-    let text = match std::fs::read_to_string(file) {
-        Ok(t) => t,
+    let text = match std::fs::read(file) {
+        Ok(b) if file.to_ascii_lowercase().ends_with(".asc") => {
+            let (s, skipped) = gui::asc::import(&swiftsim::netlist::decode(&b));
+            if !skipped.is_empty() {
+                println!("warning: unsupported LTspice symbols left out (their nets are open): {}", skipped.join(", "));
+            }
+            s.netlist().text
+        }
+        Ok(b) => swiftsim::netlist::decode(&b),
         Err(e) => {
             eprintln!("{file}: {e}");
             return 1;

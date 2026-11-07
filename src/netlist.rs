@@ -8,7 +8,7 @@ use crate::solver::C64;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, RwLock};
 
 /// Parameter values plus the `.func`s visible at that level.
 #[derive(Clone, Debug, Default)]
@@ -83,6 +83,8 @@ pub struct Deck {
     pub temps: Vec<Line>,
     pub four: Vec<Line>,
     pub warnings: Vec<String>,
+    /// `.lib`/`.include` files skipped because they are vendor-encrypted.
+    pub encrypted: Vec<String>,
 }
 
 /// Generic parts available without `.model` lines. Values are typical
@@ -141,6 +143,108 @@ pub fn builtin_names(kinds: &[&str]) -> Vec<String> {
             kinds.contains(&kind.as_str()).then(|| name.to_string())
         })
         .collect()
+}
+
+static LTSPICE_LIB: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+/// Sets LTspice's `lib` folder (the GUI setting). `None` falls back to the
+/// `SWIFTSIM_LTSPICE_LIB` environment variable, then to auto-detection.
+pub fn set_ltspice_lib(p: Option<PathBuf>) {
+    *LTSPICE_LIB.write().unwrap_or_else(|e| e.into_inner()) = p;
+}
+
+/// LTspice's `lib` folder (holds `cmp/standard.*` and `sub/`), if any is set or found.
+pub fn ltspice_lib() -> Option<PathBuf> {
+    let set = LTSPICE_LIB.read().unwrap_or_else(|e| e.into_inner()).clone();
+    set.or_else(|| std::env::var_os("SWIFTSIM_LTSPICE_LIB").map(PathBuf::from)).or_else(|| detect_ltspice_lib().clone())
+}
+
+/// The first LTspice install found in the usual places (native Windows, Wine, macOS).
+pub fn detect_ltspice_lib() -> &'static Option<PathBuf> {
+    static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FOUND.get_or_init(|| {
+        let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
+        let mut dirs = vec![];
+        if let Some(d) = env("LOCALAPPDATA") {
+            dirs.push(d.join("LTspice/lib")); // LTspice 24+
+        }
+        if let Some(d) = env("USERPROFILE") {
+            dirs.push(d.join("Documents/LTspiceXVII/lib"));
+        }
+        if let Some(h) = env("HOME") {
+            dirs.push(h.join("Library/Application Support/LTspice/lib"));
+            let user = env("USER").unwrap_or_default();
+            let users = env("WINEPREFIX").unwrap_or_else(|| h.join(".wine")).join("drive_c/users").join(user);
+            for d in ["AppData/Local/LTspice/lib", "Documents/LTspiceXVII/lib", "My Documents/LTspiceXVII/lib"] {
+                dirs.push(users.join(d));
+            }
+        }
+        dirs.into_iter().find(|d| d.join("cmp").is_dir())
+    })
+}
+
+/// `.model`s of LTspice's `cmp/standard.*` files, read once per folder. Only
+/// read at run time: these files belong to LTspice and are not shipped.
+fn ltspice_models(lib: &Path) -> &'static HashMap<String, Model> {
+    static CACHE: Mutex<Vec<(PathBuf, &'static HashMap<String, Model>)>> = Mutex::new(vec![]);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((_, m)) = cache.iter().find(|(p, _)| p == lib) {
+        return m;
+    }
+    let mut text = String::new();
+    for f in ["standard.dio", "standard.bjt", "standard.mos", "standard.jft"] {
+        if let Ok(b) = std::fs::read(lib.join("cmp").join(f)) {
+            text += &decode(&b);
+            text.push('\n');
+        }
+    }
+    let (raw, mut lines) = (text.lines().collect::<Vec<_>>(), vec![]);
+    let _ = read_lines(&raw, 0, None, &mut lines, &mut vec![], &mut vec![], 0);
+    let mut models: HashMap<String, Model> = lines.iter().filter_map(|l| parse_model(&l.text).ok()).collect();
+    resolve_ako(&mut models);
+    // leaked on purpose: one small map per library folder used in this process
+    let m: &'static HashMap<String, Model> = Box::leak(Box::new(models));
+    cache.push((lib.to_path_buf(), m));
+    m
+}
+
+/// `.model x ako:base kind(…)` ("a kind of", LTspice): base's parameters plus x's own.
+fn resolve_ako(models: &mut HashMap<String, Model>) {
+    let akos: Vec<String> = models.iter().filter(|(_, m)| m.params.contains_key("ako")).map(|(k, _)| k.clone()).collect();
+    for k in akos {
+        let mut m = models.remove(&k).unwrap_or_default();
+        let base = m.params.remove("ako").unwrap_or_default();
+        if let Some(b) = models.get(&base) {
+            let mut p = b.params.clone();
+            p.remove("ako");
+            p.extend(m.params);
+            m.params = p;
+        }
+        models.insert(k, m);
+    }
+}
+
+/// Text of a model/schematic file: UTF-16LE (newer LTspice), UTF-8, or Latin-1 (µ as 0xB5).
+pub fn decode(b: &[u8]) -> String {
+    if b.starts_with(&[0xFF, 0xFE]) || b.get(1) == Some(&0) {
+        let u: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        return String::from_utf16_lossy(&u).trim_start_matches('\u{feff}').to_string();
+    }
+    String::from_utf8(b.to_vec()).unwrap_or_else(|_| b.iter().map(|&c| c as char).collect())
+}
+
+/// Vendor-encrypted model files (LTspice's own format, Cadence/PSpice) cannot be simulated.
+fn is_encrypted(t: &str) -> bool {
+    t.contains("LTspice Encrypted File") || t.contains("$CDNENCSTART")
+}
+
+/// `.param a=1 b={a*2}`, or LTspice's `.param a 1` (no `=`).
+fn param_list(s: &str) -> Vec<(String, String)> {
+    if s.contains('=') {
+        return parse_assignments(s);
+    }
+    let w: Vec<&str> = s.split_whitespace().collect();
+    w.chunks_exact(2).map(|p| (p[0].to_string(), p[1].to_string())).collect()
 }
 
 /// Split a card into tokens: whitespace/comma separated, with `(`, `)` and
@@ -239,6 +343,13 @@ fn parse_model(t: &str) -> Result<(String, Model), String> {
     let rest = t.trim_start().strip_prefix(".model").ok_or("not a .model line")?.trim_start();
     let (name, rest) = rest.split_once(char::is_whitespace).ok_or("incomplete .model")?;
     let rest = rest.trim_start();
+    let (ako, rest) = match rest.strip_prefix("ako:") {
+        Some(r) => {
+            let (b, r) = r.split_once(char::is_whitespace).unwrap_or((r, ""));
+            (Some(b), r.trim_start())
+        }
+        None => (None, rest),
+    };
     let kend = rest.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(rest.len());
     let kind = rest[..kend].to_string();
     let body = rest[kend..].trim().trim_start_matches('(').trim_end().trim_end_matches(')');
@@ -250,6 +361,9 @@ fn parse_model(t: &str) -> Result<(String, Model), String> {
         if !near_eq && t.chars().all(|c| c.is_ascii_alphabetic()) {
             params.insert(t.clone(), "1".into());
         }
+    }
+    if let Some(b) = ako {
+        params.insert("ako".into(), b.to_string()); // merged by resolve_ako
     }
     Ok((name.to_string(), Model { kind, params }))
 }
@@ -318,7 +432,7 @@ impl Deck {
             }
         }
         let mut lines = vec![];
-        read_lines(&raw[start..], start, base, &mut lines, &mut d.warnings, 0)?;
+        read_lines(&raw[start..], start, base, &mut lines, &mut d.warnings, &mut d.encrypted, 0)?;
         d.classify(lines)?;
         Ok(d)
     }
@@ -366,14 +480,14 @@ impl Deck {
             }
             if let Some((_, sub)) = stack.last_mut() {
                 if first == ".param" || first == ".params" {
-                    sub.params.extend(parse_assignments(after_words(&l.text, 1)));
+                    sub.params.extend(param_list(after_words(&l.text, 1)));
                 } else {
                     sub.body.push(l);
                 }
                 continue;
             }
             match first.as_str() {
-                ".param" | ".params" => self.params.extend(parse_assignments(after_words(&l.text, 1))),
+                ".param" | ".params" => self.params.extend(param_list(after_words(&l.text, 1))),
                 ".op" | ".tran" | ".ac" | ".dc" | ".tf" => {
                     if self.analysis.is_none() {
                         self.analysis = Some(l);
@@ -395,6 +509,7 @@ impl Deck {
         if let Some((n, _)) = stack.last() {
             return Err(format!(".subckt {n} has no matching .ends"));
         }
+        resolve_ako(&mut self.models);
         Ok(())
     }
 
@@ -559,8 +674,18 @@ impl Deck {
         Ok((out, warn))
     }
 
+    /// Netlist `.model`s, then SwiftSim's built-ins, then LTspice's `cmp/standard.*`.
+    fn find_model(&self, name: &str) -> Option<&Model> {
+        self.models.get(name).or_else(|| builtin_models().get(name)).or_else(|| ltspice_models(&ltspice_lib()?).get(name))
+    }
+
+    /// Names the encrypted libraries a missing model/subcircuit may be in.
+    fn enc_hint(&self) -> String {
+        if self.encrypted.is_empty() { String::new() } else { format!("; it may be in {}, which is encrypted and cannot be read", self.encrypted.join(", ")) }
+    }
+
     fn model(&self, name: &str, kinds: &[&str]) -> Result<Model, String> {
-        if let Some(m) = self.models.get(name).or_else(|| builtin_models().get(name)) {
+        if let Some(m) = self.find_model(name) {
             if !kinds.contains(&m.kind.as_str()) {
                 return Err(format!("model '{name}' is type {}, expected {}", m.kind, kinds.join("/")));
             }
@@ -569,12 +694,14 @@ impl Deck {
         if kinds.contains(&name) {
             return Ok(Model { kind: name.into(), params: HashMap::new() });
         }
-        Err(format!("unknown model '{name}'"))
+        Err(match ltspice_lib() {
+            Some(p) => format!("unknown model '{name}' (not in the netlist, the built-ins or the LTspice library {})", p.display()),
+            None => format!("unknown model '{name}' (not built in, and no LTspice library folder found: choose it under Simulate, or set SWIFTSIM_LTSPICE_LIB)"),
+        } + &self.enc_hint())
     }
 
     fn is_model(&self, name: &str) -> bool {
-        self.models.contains_key(name)
-            || builtin_models().contains_key(name)
+        self.find_model(name).is_some()
             || matches!(name, "d" | "npn" | "pnp" | "nmos" | "pmos" | "njf" | "pjf" | "sw")
     }
 
@@ -637,7 +764,7 @@ impl Deck {
                 return Err(err(format!("{name}: missing subcircuit name")));
             }
             let sname = &rest[end - 1];
-            let sub = self.subckts.get(sname).ok_or_else(|| err(format!("unknown subcircuit '{sname}'")))?;
+            let sub = self.subckts.get(sname).ok_or_else(|| err(format!("unknown subcircuit '{sname}' (no .subckt for it in the netlist or its .lib/.include files){}", self.enc_hint())))?;
             let nodes = &rest[..end - 1];
             if nodes.len() != sub.ports.len() {
                 return Err(err(format!("{name}: {} nodes given, subcircuit '{sname}' has {} ports", nodes.len(), sub.ports.len())));
@@ -824,7 +951,7 @@ impl Deck {
     }
 }
 
-fn read_lines(raw: &[&str], offset: usize, base: Option<&Path>, out: &mut Vec<Line>, warn: &mut Vec<String>, depth: usize) -> Result<(), String> {
+fn read_lines(raw: &[&str], offset: usize, base: Option<&Path>, out: &mut Vec<Line>, warn: &mut Vec<String>, enc: &mut Vec<String>, depth: usize) -> Result<(), String> {
     if depth > 10 {
         return Err("includes nested too deeply".into());
     }
@@ -857,12 +984,22 @@ fn read_lines(raw: &[&str], offset: usize, base: Option<&Path>, out: &mut Vec<Li
                     _ => (arg.to_string(), String::new()),
                 }
             };
-            let p = PathBuf::from(&path);
-            let p = if p.is_absolute() { p } else { base.map_or(p.clone(), |b| b.join(&p)) };
-            let Ok(text) = std::fs::read_to_string(&p) else {
+            // LTspice netlists may use Windows separators
+            let rel = PathBuf::from(if cfg!(windows) { path.clone() } else { path.replace('\\', "/") });
+            let mut tries = vec![if rel.is_absolute() { rel.clone() } else { base.map_or(rel.clone(), |b| b.join(&rel)) }];
+            // like LTspice, relative names also resolve in its lib/sub and lib/cmp folders
+            if let (false, Some(lt)) = (rel.is_absolute(), ltspice_lib()) {
+                tries.extend(["sub", "cmp", ""].map(|d| lt.join(d).join(&rel)));
+            }
+            let Some((text, p)) = tries.into_iter().find_map(|p| Some((decode(&std::fs::read(&p).ok()?), p))) else {
                 warn.push(format!("line {no}: library '{path}' not found, ignored (built-in models are still available)"));
                 continue;
             };
+            if is_encrypted(&text) {
+                warn.push(format!("line {no}: library '{path}' is vendor-encrypted; SwiftSim cannot read encrypted models, so parts using it will fail"));
+                enc.push(format!("'{path}'"));
+                continue;
+            }
             let lines: Vec<&str> = text.lines().collect();
             let pick: Vec<&str> = if section.is_empty() {
                 lines
@@ -884,7 +1021,7 @@ fn read_lines(raw: &[&str], offset: usize, base: Option<&Path>, out: &mut Vec<Li
                     })
                     .collect()
             };
-            read_lines(&pick, 0, p.parent(), out, warn, depth + 1)?;
+            read_lines(&pick, 0, p.parent(), out, warn, enc, depth + 1)?;
             continue;
         }
         if low == ".end" {
@@ -1334,5 +1471,46 @@ mod tests {
         assert_eq!(m.kind, "vdmos");
         assert!(m.params.contains_key("pchan"));
         assert_eq!(m.params["vto"], "-2");
+    }
+
+    #[test]
+    fn ltspice_param_without_equals_and_ako() {
+        let d = Deck::parse("t\n.param vid 0.001\n.param f 1k\n.model base npn(bf=50 vaf=80)\n.model q2 ako:base npn(bf=200)\n", None).unwrap();
+        let sc = d.eval_params(&HashMap::new()).unwrap();
+        assert_eq!((sc["vid"], sc["f"]), (0.001, 1000.0));
+        let m = d.model("q2", &["npn"]).unwrap();
+        assert_eq!((m.params["bf"].as_str(), m.params["vaf"].as_str(), m.params.get("ako")), ("200", "80", None));
+    }
+
+    // a stand-in LTspice lib folder written by the test (LTspice's own files are never copied here)
+    #[test]
+    fn ltspice_library_lookup() {
+        let lib = std::env::temp_dir().join(format!("swiftsim-ltlib-{}", std::process::id()));
+        std::fs::create_dir_all(lib.join("cmp")).unwrap();
+        std::fs::create_dir_all(lib.join("sub")).unwrap();
+        std::fs::write(lib.join("cmp/standard.bjt"), ".model LTONLY1 NPN(IS=1E-14 BF=123\n+ VAF=100) ; comment\n.model LTONLY2 ako:LTONLY1 NPN(VAF=50 mfg=Test)\n").unwrap();
+        std::fs::write(lib.join("sub/ltdiv.sub"), ".subckt ltdiv a b\nR1 a b 1k\n.ends ltdiv\n").unwrap();
+        std::fs::write(lib.join("sub/secret.lib"), "* LTspice Encrypted File\n*\n* Begin:\n  A3 1D 22 9F\n").unwrap();
+        assert!(is_encrypted("$CDNENCSTART\nabc\n$CDNENCFINISH"));
+
+        set_ltspice_lib(Some(lib.clone()));
+        let net = "t\n.lib ltdiv.sub\n.lib secret.lib\nV1 c 0 5\nQ1 c c 0 LTONLY2\nX1 c 0 ltdiv\n.op\n";
+        let d = Deck::parse(net, None).unwrap();
+        let built = d.build(&HashMap::new()).map(|_| ());
+        let m = d.model("ltonly2", &["npn"]);
+        let missing = Deck::parse("t\nX1 a 0 secretpart\nD1 a 0 nosuchdiode\n", None).unwrap();
+        let (sub_err, model_err) = (missing.build(&HashMap::new()).err().unwrap_or_default(), missing.model("nosuchdiode", &["d"]).err().unwrap_or_default());
+        let missing_enc = Deck::parse("t\n.lib secret.lib\nX1 a 0 secretpart\n", None).unwrap().build(&HashMap::new()).err().unwrap_or_default();
+        set_ltspice_lib(None);
+        std::fs::remove_dir_all(&lib).ok();
+
+        built.unwrap();
+        let m = m.unwrap();
+        assert_eq!((m.params["bf"].as_str(), m.params["vaf"].as_str()), ("123", "50"));
+        assert!(d.subckts.contains_key("ltdiv"), "{:?}", d.warnings);
+        assert!(d.warnings.iter().any(|w| w.contains("'secret.lib' is vendor-encrypted")), "{:?}", d.warnings);
+        assert!(sub_err.contains("unknown subcircuit 'secretpart'") && !sub_err.contains("encrypted"), "{sub_err}");
+        assert!(model_err.contains("unknown model 'nosuchdiode'") && model_err.contains("swiftsim-ltlib"), "{model_err}");
+        assert!(missing_enc.contains("'secret.lib', which is encrypted"), "{missing_enc}");
     }
 }
