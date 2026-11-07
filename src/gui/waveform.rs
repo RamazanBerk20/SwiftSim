@@ -412,6 +412,7 @@ impl WaveView {
         }
         self.c1 = c1;
         self.c2 = c2;
+        let mut close = false;
         if c1.is_some() || c2.is_some() {
             egui::Grid::new("readout").striped(true).show(ui, |ui| {
                 ui.strong(&xname);
@@ -426,6 +427,7 @@ impl WaveView {
                         ui.strong("Δ");
                     }
                 }
+                close = ui.small_button("× Close").on_hover_text("Remove both cursors (traces stay)").clicked();
                 ui.end_row();
                 for s in self.series.iter().filter(|s| self.traces[s.trace].visible).take(6) {
                     let t = &self.traces[s.trace];
@@ -443,6 +445,10 @@ impl WaveView {
                     ui.end_row();
                 }
             });
+        }
+        if close {
+            self.c1 = None;
+            self.c2 = None;
         }
     }
 }

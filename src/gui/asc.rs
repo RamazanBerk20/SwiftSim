@@ -31,7 +31,8 @@ fn symbol(name: &str) -> Option<(Kind, &'static [P], P, bool)> {
         // g's output pins run bottom-to-top; unflipped, the stubs would short them
         "g" => (Vccs, &[[0, 6], [0, 1], [-3, 2], [-3, 5]], [0, 3], true),
         "sw" => (Switch, &[[0, 1], [0, 6], [-3, 5], [-3, 2]], [0, 3], false),
-        "opamp" => (OpAmp, &[[-2, 5], [-2, 3], [2, 4]], [0, 4], false),
+        // LTspice's opamp has − on top; SwiftSim's has + on top, so flip it onto LTspice's pins
+        "opamp" => (OpAmp, &[[-2, 5], [-2, 3], [2, 4]], [0, 4], true),
         _ => return None,
     })
 }

@@ -202,11 +202,20 @@ pub struct Text {
     pub text: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Schematic {
+    /// File format version; files saved before versioning load as 0 (see `upgrade`).
+    #[serde(default)]
+    pub format: u32,
     pub comps: Vec<Component>,
     pub wires: Vec<Wire>,
     pub texts: Vec<Text>,
+}
+
+impl Default for Schematic {
+    fn default() -> Self {
+        Schematic { format: Schematic::FORMAT, comps: vec![], wires: vec![], texts: vec![] }
+    }
 }
 
 /// Drawing primitive in local grid units.
@@ -223,7 +232,8 @@ pub fn pins(k: Kind) -> &'static [P] {
         Kind::Resistor | Kind::Capacitor | Kind::Inductor | Kind::Diode | Kind::Voltage | Kind::Current | Kind::Behavioral => &[[0, -2], [0, 2]],
         Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos | Kind::Njf | Kind::Pjf => &[[1, -2], [-2, 0], [1, 2]],
         Kind::Nmos4 | Kind::Pmos4 => &[[1, -2], [-2, 0], [1, 2], [1, 0]],
-        Kind::OpAmp => &[[-2, 1], [-2, -1], [2, 0]],
+        // inp (+) on top, inn (−) below (format 1; format 0 had them the other way round)
+        Kind::OpAmp => &[[-2, -1], [-2, 1], [2, 0]],
         Kind::Vcvs | Kind::Vccs | Kind::Switch => &[[0, -2], [0, 2], [-2, -1], [-2, 1]],
         Kind::Ground | Kind::Label => &[[0, 0]],
         Kind::Subckt => &[],
@@ -322,14 +332,15 @@ pub fn symbol(k: Kind) -> Vec<Prim> {
             Line(vec![[-0.5, 0.7], [1., 0.7], [1., 2.]]),
             if k == Kind::Njf { Poly(vec![[-0.55, 0.], [-1.0, -0.22], [-1.0, 0.22]]) } else { Poly(vec![[-1.0, 0.], [-0.55, -0.22], [-0.55, 0.22]]) },
         ],
+        // outline, not filled: the + (top, non-inverting) and − (bottom) marks sit inside it
         Kind::OpAmp => vec![
-            Poly(vec![[-1.5, -1.8], [-1.5, 1.8], [1.6, 0.]]),
+            Line(vec![[-1.5, -1.8], [-1.5, 1.8], [1.6, 0.], [-1.5, -1.8]]),
             Line(vec![[-2., -1.], [-1.5, -1.]]),
             Line(vec![[-2., 1.], [-1.5, 1.]]),
             Line(vec![[1.6, 0.], [2., 0.]]),
-            Line(vec![[-1.3, -1.], [-0.9, -1.]]),
-            Line(vec![[-1.3, 1.], [-0.9, 1.]]),
-            Line(vec![[-1.1, 0.8], [-1.1, 1.2]]),
+            Line(vec![[-1.35, -1.], [-0.85, -1.]]),
+            Line(vec![[-1.1, -1.25], [-1.1, -0.75]]),
+            Line(vec![[-1.35, 1.], [-0.85, 1.]]),
         ],
         Kind::Vcvs | Kind::Vccs | Kind::Behavioral => {
             let mut v = vec![
@@ -644,6 +655,36 @@ impl Schematic {
         Netlist { text: t, nets, degree }
     }
 
+    /// Current file format. 1: op-amp + input moved to the top.
+    pub const FORMAT: u32 = 1;
+
+    /// Brings a schematic read from an older file to the current format. Every pin keeps its
+    /// position, so connections and simulation results are unchanged.
+    pub fn upgrade(&mut self) {
+        if self.format < 1 {
+            // format 0 op-amps had + at the bottom: flip vertically (mirror + half turn)
+            for c in self.comps.iter_mut().filter(|c| c.kind == Kind::OpAmp) {
+                c.rot = (c.rot + 2) % 4;
+                c.mirror = !c.mirror;
+            }
+        }
+        self.format = Self::FORMAT;
+    }
+
+    /// Nets of the net labels, in placement order, for auto-plotting. A label on a grounded
+    /// net is skipped: that net is `0` (always 0 V), so `V(label)` would not exist.
+    pub fn label_nets(&self) -> Vec<String> {
+        let n = self.netlist();
+        let mut v: Vec<String> = vec![];
+        for c in self.comps.iter().filter(|c| c.kind == Kind::Label) {
+            let net = &n.nets[&c.pin_pos()[0]];
+            if net != "0" && !v.contains(net) {
+                v.push(net.clone());
+            }
+        }
+        v
+    }
+
     pub fn next_name(&self, k: Kind) -> String {
         let p = k.prefix();
         if p.is_empty() {
@@ -685,6 +726,7 @@ mod tests {
             ],
             wires: vec![Wire { a: [0, -2], b: [4, -2] }, Wire { a: [0, 2], b: [0, 6] }, Wire { a: [4, 2], b: [6, 2] }],
             texts: vec![Text { pos: [0, 10], text: ".op".into() }],
+            ..Default::default()
         };
         let n = s.netlist();
         assert!(n.text.contains("R2 out 0 1k"), "{}", n.text);
@@ -695,8 +737,51 @@ mod tests {
     }
 
     #[test]
+    fn old_files_keep_op_amp_pins_when_upgraded() {
+        // a format-0 file (no "format" field): op-amp pins were inp (-2,1), inn (-2,-1), out (2,0)
+        for rot in 0..4u8 {
+            for mirror in [false, true] {
+                let c = Component { rot, mirror, ..comp(Kind::OpAmp, "U1", "", [5, 7]) };
+                let old: Vec<P> = [[-2.0, 1.0], [-2.0, -1.0], [2.0, 0.0]].iter().map(|&p| c.tf(p)).map(|q| [q[0].round() as i32, q[1].round() as i32]).collect();
+                let json = format!(r#"{{"comps":[{}],"wires":[],"texts":[]}}"#, serde_json::to_string(&c).unwrap());
+                let mut s: Schematic = serde_json::from_str(&json).unwrap();
+                assert_eq!(s.format, 0);
+                s.upgrade();
+                assert_eq!((s.format, s.comps[0].pin_pos()), (Schematic::FORMAT, old.clone()), "rot {rot} mirror {mirror}");
+                s.upgrade(); // idempotent
+                assert_eq!(s.comps[0].pin_pos(), old);
+            }
+        }
+        // new files say format 1 and are left alone
+        let json = serde_json::to_string(&Schematic { comps: vec![comp(Kind::OpAmp, "U1", "", [0, 0])], ..Default::default() }).unwrap();
+        let mut s: Schematic = serde_json::from_str(&json).unwrap();
+        s.upgrade();
+        assert_eq!((s.comps[0].rot, s.comps[0].mirror), (0, false));
+    }
+
+    #[test]
+    fn labels_on_ground_are_not_plotted() {
+        // lab Fig. 4: B is wired straight to ground, A and C are real nets
+        let s = Schematic {
+            comps: vec![
+                comp(Kind::Resistor, "R2", "1k", [0, 0]),
+                comp(Kind::Ground, "", "", [0, 2]),
+                comp(Kind::Label, "", "A", [0, -2]),
+                comp(Kind::Label, "", "B", [4, 0]),
+                comp(Kind::Ground, "", "", [4, 2]),
+                comp(Kind::Label, "", "C", [8, 0]),
+                comp(Kind::Label, "", "A", [0, -2]),
+            ],
+            wires: vec![Wire { a: [4, 0], b: [4, 2] }],
+            texts: vec![],
+            ..Default::default()
+        };
+        assert_eq!(s.label_nets(), ["A", "C"]);
+    }
+
+    #[test]
     fn t_junction_mid_wire_connects() {
-        let s = Schematic { comps: vec![], wires: vec![Wire { a: [0, 0], b: [10, 0] }, Wire { a: [5, 0], b: [5, 5] }], texts: vec![] };
+        let s = Schematic { comps: vec![], wires: vec![Wire { a: [0, 0], b: [10, 0] }, Wire { a: [5, 0], b: [5, 5] }], texts: vec![], ..Default::default() };
         let n = s.netlist();
         assert_eq!(n.nets[&[0, 0]], n.nets[&[5, 5]]);
         assert_eq!(n.degree[&[5, 0]], 3);

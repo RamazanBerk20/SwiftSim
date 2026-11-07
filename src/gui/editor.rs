@@ -247,6 +247,7 @@ impl Editor {
             comps: self.sel.comps.iter().map(|&i| s.comps[i].clone()).collect(),
             wires: self.sel.wires.iter().map(|&i| s.wires[i]).collect(),
             texts: self.sel.texts.iter().map(|&i| s.texts[i].clone()).collect(),
+            ..Default::default()
         });
     }
 

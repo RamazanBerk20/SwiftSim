@@ -162,7 +162,8 @@ impl App {
         };
         if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("sws")) {
             match serde_json::from_str::<Schematic>(&text) {
-                Ok(s) => {
+                Ok(mut s) => {
+                    s.upgrade();
                     self.mode = Mode::Schematic;
                     self.ed.load(s);
                 }
@@ -266,7 +267,8 @@ impl App {
 
     fn restore(&mut self, s: Snapshot) {
         match s.doc {
-            Doc::Schematic(sch) => {
+            Doc::Schematic(mut sch) => {
+                sch.upgrade();
                 self.mode = Mode::Schematic;
                 self.ed.load(sch);
                 self.ed.dirty = true;
@@ -386,9 +388,8 @@ impl App {
                                     self.waves.add("V(onoise)");
                                 }
                             } else if self.waves.traces.is_empty() && self.mode == Mode::Schematic {
-                                let labels: Vec<String> = self.ed.sch.comps.iter().filter(|c| c.kind == Kind::Label).map(|c| format!("V({})", c.value.trim())).collect();
-                                for l in labels.into_iter().take(4) {
-                                    self.waves.add(&l);
+                                for net in self.ed.sch.label_nets().into_iter().take(4) {
+                                    self.waves.add(&format!("V({net})"));
                                 }
                             }
                             self.tab = Tab::Waves;
@@ -1355,6 +1356,7 @@ fn examples() -> Vec<(&'static str, Schematic)> {
         ],
         wires: [wires(&[[0, -2], [0, -4], [5, -4]]), wires(&[[9, -4], [14, -4], [14, -2]])].concat(),
         texts: vec![txt(0, 6, ".tran 20m\n* switch to AC: .ac dec 50 1 100k")],
+        ..Default::default()
     };
     let ce = Schematic {
         comps: vec![
@@ -1386,28 +1388,31 @@ fn examples() -> Vec<(&'static str, Schematic)> {
         ]
         .concat(),
         texts: vec![txt(-4, 11, ".tran 5m")],
+        ..Default::default()
     };
+    // inverting amplifier, gain -10: + (top) to ground, Rin and Rf on − (bottom)
     let opamp = Schematic {
         comps: vec![
             comp(Kind::OpAmp, "U1", "Aol=100k GBW=10Meg", [10, 0], 0),
-            comp(Kind::Resistor, "Rin", "1k", [4, -1], 1),
-            comp(Kind::Resistor, "Rf", "10k", [10, -4], 1),
-            g(8, 3),
-            comp(Kind::Voltage, "Vin", "SINE(0 0.5 1k) AC 1", [0, 2], 0),
-            g(0, 4),
-            lbl("in", 0, -1),
+            comp(Kind::Resistor, "Rin", "1k", [4, 1], 1),
+            comp(Kind::Resistor, "Rf", "10k", [10, 5], 1),
+            comp(Kind::Ground, "", "", [8, -3], 2),
+            comp(Kind::Voltage, "Vin", "SINE(0 0.5 1k) AC 1", [0, 3], 0),
+            g(0, 5),
+            lbl("in", 0, 1),
             lbl("out", 14, 0),
         ],
         wires: [
-            wires(&[[6, -1], [8, -1]]),
-            wires(&[[8, -4], [8, -1]]),
-            wires(&[[12, -4], [12, 0]]),
-            wires(&[[8, 1], [8, 3]]),
-            wires(&[[0, 0], [0, -1], [2, -1]]),
+            wires(&[[0, 1], [2, 1]]),
+            wires(&[[6, 1], [8, 1]]),
+            wires(&[[8, 5], [8, 1]]),
+            wires(&[[12, 5], [12, 0]]),
+            wires(&[[8, -1], [8, -3]]),
             wires(&[[12, 0], [14, 0]]),
         ]
         .concat(),
-        texts: vec![txt(0, 8, ".tran 3m\n.meas tran gain PARAM -10")],
+        texts: vec![txt(0, 9, ".tran 3m\n.meas tran gain PARAM -10")],
+        ..Default::default()
     };
     let rect = Schematic {
         comps: vec![
@@ -1422,6 +1427,7 @@ fn examples() -> Vec<(&'static str, Schematic)> {
         ],
         wires: [wires(&[[0, -2], [0, -4], [2, -4]]), wires(&[[6, -4], [8, -4], [8, -2]]), wires(&[[8, -4], [12, -4], [12, -2]])].concat(),
         texts: vec![txt(0, 6, ".tran 100m\n.meas tran ripple PP V(out) FROM=60m TO=100m")],
+        ..Default::default()
     };
     vec![("RC low-pass filter", rc), ("BJT common-emitter amplifier", ce), ("Op-amp inverting amplifier", opamp), ("Half-wave rectifier", rect)]
 }
@@ -1436,6 +1442,12 @@ mod tests {
             assert!(!r.plots.is_empty(), "{name}");
             let p = &r.plots[0];
             assert!(p.index("v(out)").is_some(), "{name}: {:?}\n{}", p.names, n.text);
+            if name.starts_with("Op-amp") {
+                // inverting gain -10: at the input's positive peak (t = 0.25 ms) the output is -5 V
+                let k = p.x.iter().position(|&t| t >= 2.5e-4).unwrap();
+                let (vin, vout) = (p.re[p.index("v(in)").unwrap()][k], p.re[p.index("v(out)").unwrap()][k]);
+                assert!((vout / vin + 10.0).abs() < 0.05, "{name}: gain {}", vout / vin);
+            }
         }
     }
 

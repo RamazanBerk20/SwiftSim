@@ -599,9 +599,11 @@ impl Parser<'_> {
                 self.i = end + 1;
                 let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
                 if name == "v" {
-                    let a = Expr::Sig(format!("v({})", parts[0]));
+                    // ground is 0 V by definition and is never a stored signal
+                    let node = |n: &str| if matches!(n, "0" | "gnd") { Expr::Num(0.0) } else { Expr::Sig(format!("v({n})")) };
+                    let a = node(parts[0]);
                     return Ok(match parts.get(1) {
-                        Some(b) if !b.is_empty() => Expr::Bin(Op::Sub, Box::new(a), Box::new(Expr::Sig(format!("v({b})")))),
+                        Some(b) if !b.is_empty() => Expr::Bin(Op::Sub, Box::new(a), Box::new(node(b))),
                         _ => a,
                     });
                 }
@@ -671,6 +673,7 @@ mod tests {
         assert_eq!(e("2**3**2"), 512.0);
         assert_eq!(e("-2^2"), -4.0);
         assert_eq!(e("r/2k"), 1.0);
+        assert_eq!(e("V(0) + V(gnd, 0) + 1"), 1.0);
         assert_eq!(e("max(1, 3) > 2 ? 10 : 20"), 10.0);
         assert_eq!(e("if(1<0, 5, 6)"), 6.0);
         for _ in 0..200 {
