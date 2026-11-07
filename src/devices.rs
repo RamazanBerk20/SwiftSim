@@ -1344,3 +1344,57 @@ impl Device for Mos {
         vec![ich - igd - ibd, igs + igd, -ich - igs - ibs]
     }
 }
+
+// ---------------------------------------------------------------- JFET
+
+/// SPICE NJF/PJF JFET: the Shichman-Hodges channel is the level-1 MOSFET
+/// law with β_mos = 2·BETA and no body effect; the gate is two pn junctions
+/// (gate-source, gate-drain) carrying IS and the depletion caps CGS/CGD.
+pub struct Jfet {
+    pub name: String,
+    pub ch: Mos,
+    pub gs: Diode,
+    pub gd: Diode,
+}
+
+impl Jfet {
+    /// Terminal currents [id, ig, is] from channel [id, ig, is] and the junction currents (anode → cathode).
+    fn terminals<T: crate::solver::Scalar>(&self, ch: Vec<T>, gs: T, gd: T) -> Vec<T> {
+        // n-channel junctions point gate → channel, p-channel channel → gate
+        let (gs, gd) = if self.ch.md.pol > 0.0 { (gs, gd) } else { (-gs, -gd) };
+        vec![ch[0] - gd, gs + gd, ch[2] - gs]
+    }
+}
+
+impl Device for Jfet {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn nonlinear(&self) -> bool {
+        true
+    }
+    fn setup(&mut self, s: &mut Setup) {
+        self.ch.setup(s);
+        self.gs.setup(s);
+        self.gd.setup(s);
+    }
+    fn load(&mut self, m: &mut Matrix<f64>, c: &LoadCtx, st: &mut [f64]) -> bool {
+        let a = self.ch.load(m, c, st);
+        let b = self.gs.load(m, c, st);
+        self.gd.load(m, c, st) | a | b
+    }
+    fn load_ac(&self, m: &mut Matrix<C64>, x: &[f64], w: f64, st: &[f64]) {
+        self.ch.load_ac(m, x, w, st);
+        self.gs.load_ac(m, x, w, st);
+        self.gd.load_ac(m, x, w, st);
+    }
+    fn current_names(&self) -> Vec<String> {
+        ["id", "ig", "is"].iter().map(|p| format!("{p}({})", self.name)).collect()
+    }
+    fn currents(&self, x: &[f64], st: &[f64]) -> Vec<f64> {
+        self.terminals(self.ch.currents(x, st), self.gs.currents(x, st)[0], self.gd.currents(x, st)[0])
+    }
+    fn ac_currents(&self, x: &[f64], v: &[C64], w: f64, st: &[f64]) -> Vec<C64> {
+        self.terminals(self.ch.ac_currents(x, v, w, st), self.gs.ac_currents(x, v, w, st)[0], self.gd.ac_currents(x, v, w, st)[0])
+    }
+}

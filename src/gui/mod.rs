@@ -622,7 +622,7 @@ impl App {
                 changed = Some(Component { value: v, ..c.clone() });
             }
         }
-        if matches!(c.kind, Kind::Nmos | Kind::Pmos) {
+        if matches!(c.kind, Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4) {
             ui.weak("Level-1 models accept W=… L=… after the model name.");
         }
         if c.kind == Kind::Behavioral {

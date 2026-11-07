@@ -247,3 +247,145 @@ fn errors_are_reported() {
     assert!(e("t\nD1 a 0 nomodel\n.op\n").contains("unknown model"));
     assert!(e("t\nX1 a b nosub\n.op\n").contains("unknown subcircuit"));
 }
+
+#[test]
+fn poly_controlled_sources() {
+    // E: 1 + 2a + 3b + .5a² + .25ab + .125b² at a=2, b=3 → 18.625 (SPICE term order)
+    // G POLY(1) with one coefficient is a plain transconductance; F/H take control currents
+    let r = sim("poly
+Va a 0 2
+Vb b 0 3
+E1 e 0 POLY(2) (a,0) (b,0) 1 2 3 .5 .25 .125
+Re e 0 1k
+G1 0 g POLY(1) a 0 1m
+Rg g 0 1k
+Vs a s 0
+Rs s 0 1k
+F1 0 f POLY(1) Vs 0 2
+Rf f 0 1k
+H1 h 0 POLY(2) Vs Va 1 1k 0 0 500k
+Rh h 0 1k
+.op
+");
+    let p = &r.plots[0];
+    close(sig(p, "v(e)")[0], 18.625, 1e-6);
+    close(sig(p, "v(g)")[0], 2.0, 1e-6);
+    close(sig(p, "v(f)")[0], 4.0, 1e-6);
+    // H terms: 1 + 1k·I(Vs) + 0·I(Va) + 0·I(Vs)² + 500k·I(Vs)·I(Va), with I(Vs) = 2m, I(Va) = -2m
+    close(sig(p, "i(vs)")[0], 2e-3, 1e-6);
+    close(sig(p, "i(va)")[0], -2e-3, 1e-6);
+    close(sig(p, "v(h)")[0], 1.0, 1e-6);
+}
+
+#[test]
+fn user_functions() {
+    let r = sim(".func sq(x) {x*x}
+.func hyp(x, y) = sqrt(sq(x) + sq(y))
+.param x=100 k=2
+.param r0={hyp(3, 4)*1k}
+.subckt amp in out
+.func gain(v) {k*v}
+B1 out 0 V=gain(V(in)) + x/100
+.ends
+V1 in 0 1.5
+R0 in 0 {r0}
+X1 in o amp
+B2 o2 0 V=hyp(V(in), 2)
+.op
+");
+    let p = &r.plots[0];
+    close(sig(p, "i(r0)")[0], 1.5 / 5e3, 1e-9);
+    // arguments shadow the global .param x; subckt function sees global k
+    close(sig(p, "v(o)")[0], 2.0 * 1.5 + 1.0, 1e-6);
+    close(sig(p, "v(o2)")[0], 2.5, 1e-6);
+    let e = run_netlist("t\n.func f(x) {g(x)}\n.func g(x) {f(x)}\nV1 a 0 {f(1)}\n.op\n", None, &Control::default()).err().unwrap();
+    assert!(e.contains("recursive"), "{e}");
+    // a subcircuit's function is not visible outside it
+    let e = run_netlist("t\n.subckt s a\n.func h(x) {x}\nR1 a 0 1\n.ends\nV1 a 0 {h(1)}\n.op\n", None, &Control::default()).err().unwrap();
+    assert!(e.contains("unknown function 'h'"), "{e}");
+}
+
+#[test]
+fn table_sources() {
+    // E 4-node: x = V(c); G 2-node: x = expression; clamped outside the table
+    let net = |vc: f64| {
+        sim(&format!(
+            "tbl\nVc c 0 {vc}\nE1 e 0 c 0 table=(0,0 1,10 2,15)\nRe e 0 1k\nG1 0 g TABLE {{V(c)*2}} = (0,0) (4,4m)\nRg g 0 1k\n.op\n"
+        ))
+    };
+    for (vc, ve, vg) in [(0.5, 5.0, 1.0), (1.5, 12.5, 3.0), (3.0, 15.0, 4.0), (-1.0, 0.0, 0.0)] {
+        let r = net(vc);
+        close(sig(&r.plots[0], "v(e)")[0], ve, 1e-9);
+        close(sig(&r.plots[0], "v(g)")[0], vg, 1e-9);
+    }
+}
+
+#[test]
+fn jfet_square_law_and_gate() {
+    // extra vendor parameters (betatce, vtotc, mfg) are accepted and ignored
+    let m = ".model jn NJF(vto=-2 beta=1m lambda=10m is=1f cgs=2p cgd=1p pb=1 betatce=-.5 vtotc=-2.5m mfg=Fairchild)\n.model jp PJF(vto=-2 beta=1m lambda=10m)\n";
+    // saturation: β(Vgs-Vto)²(1+λVds); linear: βVds(2(Vgs-Vto)-Vds)(1+λVds)
+    let r = sim(&format!("j\n{m}Vd d 0 5\nVg g 0 -1\nJ1 d g 0 jn\nVd2 d2 0 0.5\nJ2 d2 g 0 jn\nVd3 d3 0 -5\nVg3 g3 0 1\nJ3 d3 g3 0 jp\n.op\n"));
+    let p = &r.plots[0];
+    close(sig(p, "id(j1)")[0], 1e-3 * 1.05, 1e-6);
+    close(sig(p, "id(j2)")[0], 1e-3 * 0.5 * 1.5 * 1.005, 1e-6);
+    close(sig(p, "id(j3)")[0], -1e-3 * 1.05, 1e-6);
+    // gate forward-biased by 1 mA with drain tied to source: two junctions in parallel
+    let r = sim(&format!("jg\n{m}Ig 0 g 1m\nJ1 0 g 0 jn\n.op\n"));
+    let p = &r.plots[0];
+    close(sig(p, "ig(j1)")[0], 1e-3, 1e-6);
+    close(sig(p, "v(g)")[0], 0.025864186 * (1e-3f64 / 2e-15).ln(), 2e-3);
+    // AC gate current through Cgs(Vgs=-1) + Cgd(Vgd=-6) depletion caps
+    let r = sim(&format!("jac\n{m}Vd d 0 5\nVg g 0 -1 AC 1\nJ1 d g 0 jn\n.ac lin 1 1meg 1meg\n"));
+    let p = &r.plots[0];
+    let k = p.index("ig(j1)").unwrap();
+    let c = 2e-12 / 2f64.sqrt() + 1e-12 / 7f64.sqrt();
+    close(p.re[k][0].hypot(p.im[k][0]), 2.0 * std::f64::consts::PI * 1e6 * c, 1e-3);
+}
+
+fn model(file: &str) -> String {
+    format!(".include \"{}/tests/models/{file}\"\n", env!("CARGO_MANIFEST_DIR"))
+}
+
+#[test]
+fn vendor_tl072_inverting_amplifier() {
+    // TI TL072 (PJF input pair, POLY(2)/POLY(5) sources) at ±15 V, gain -10
+    let amp = |src: &str, an: &str| sim(&format!("tl072\n{}Vp vp 0 15\nVn vn 0 -15\nVin in 0 {src}\nRin in m 10k\nRf m out 100k\nX1 0 m vp vn out TL072\n{an}\n", model("TL072.301")));
+    let r = amp("0.5", ".op");
+    let p = &r.plots[0];
+    close(sig(p, "v(out)")[0], -5.0, 1e-3);
+    // input bias current ≈ the two reverse-biased gate junctions, tens of pA
+    let ib = sig(p, "ig(x1.j1)")[0];
+    assert!(ib > 1e-12 && ib < 1e-10, "ib {ib}");
+    // overdriven: output clips about 1.5 V below the rail
+    let v = sig(&amp("-2", ".op").plots[0], "v(out)")[0];
+    assert!(v > 12.5 && v < 14.5, "clip {v}");
+    let r = amp("SIN(0 0.5 1k)", ".tran 2m");
+    let p = &r.plots[0];
+    close(at(p, "v(out)", 1.25e-3), -5.0, 1e-2);
+    close(at(p, "v(out)", 1.75e-3), 5.0, 1e-2);
+}
+
+#[test]
+fn vendor_tl072_follower_bandwidth() {
+    // unity-gain bandwidth of the Boyle model: GA / (2π C2) = 282.8µ / (2π·15p) ≈ 3 MHz
+    let r = sim(&format!("tl072 ac\n{}Vp vp 0 15\nVn vn 0 -15\nVin in 0 0 AC 1\nX1 in out vp vn out TL072\n.ac dec 20 10 100meg\n", model("TL072.301")));
+    let p = &r.plots[0];
+    let k = p.index("v(out)").unwrap();
+    let mag: Vec<f64> = (0..p.x.len()).map(|i| p.re[k][i].hypot(p.im[k][i])).collect();
+    close(mag[0], 1.0, 1e-4);
+    let f3 = p.x[mag.iter().position(|&m| m < std::f64::consts::FRAC_1_SQRT_2).unwrap()];
+    assert!((2e6..8e6).contains(&f3), "f-3dB {f3}");
+}
+
+#[test]
+fn vendor_lm358_single_supply_and_inverting() {
+    // TI LM358 (PNP input pair): input range includes ground on a single 5 V supply
+    let r = sim(&format!("lm358\n{}Vp vp 0 5\nVin in 0 0.2\nX1 in out vp 0 out LM358\n.op\n", model("LM358.101")));
+    close(sig(&r.plots[0], "v(out)")[0], 0.2, 2e-3);
+    // ±5 V, gain -10, and output swing stops short of V+
+    let amp = |vin: f64| sim(&format!("lm358\n{}Vp vp 0 5\nVn vn 0 -5\nVin in 0 {vin}\nRin in m 10k\nRf m out 100k\nX1 0 m vp vn out LM358\n.op\n", model("LM358.101")));
+    close(sig(&amp(0.2).plots[0], "v(out)")[0], -2.0, 2e-3);
+    let v = sig(&amp(-1.0).plots[0], "v(out)")[0];
+    assert!(v > 3.0 && v < 4.5, "clip {v}");
+}
