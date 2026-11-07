@@ -104,6 +104,12 @@ On Windows the same commands produce `swiftsim.exe` (no console window in releas
   become boxed `X` parts with the symbol's pins and a `.lib` line for its model file.
   Other symbols are listed in the Log and left out
 - Dark / light theme; schematics saved as JSON (`.sws`)
+- Crash recovery: while a document has unsaved changes, a recovery copy is written every
+  30 s and on every run (never over your own file). If SwiftSim crashes or is killed, the next
+  start asks whether to restore it or discard it; saving or closing normally deletes it
+- File ▸ Open recent (last 10 files); theme, window size and position, panel sizes, the
+  operating-point toggle and the last folder used are remembered. All of it lives in
+  `%APPDATA%\SwiftSim` or `~/.config/swiftsim` (`recovery-*.json`, `recent.txt`, `settings.ron`)
 
 ### Keyboard
 
@@ -174,7 +180,8 @@ src/devices.rs   device models and stamps
 src/netlist.rs   parser, subcircuit flattening, models, built-in library
 src/sim.rs       OP / DC / AC / transient, .step orchestration
 src/measure.rs   .meas and plot expressions
-src/gui/         app shell, schematic model + netlister, canvas editor, waveform viewer
+src/gui/         app shell, schematic model + netlister, canvas editor, waveform viewer,
+                 recovery copies + recent files (session.rs)
 tests/engine.rs  analytic checks (RC/RL/LC, AC, diodes, BJT, MOS, JFET, POLY/table/.func, .meas …)
 tests/models/    public vendor macromodels used by the tests
 assets/          app icon (SVG source, PNGs, .ico; render.sh regenerates them)

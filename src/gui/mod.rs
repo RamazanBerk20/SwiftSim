@@ -3,17 +3,20 @@
 pub mod asc;
 mod editor;
 mod schematic;
+mod session;
 mod waveform;
 
 use eframe::egui;
 use editor::{Editor, Tool};
 use egui::{Color32, CornerRadius, Key, Modifiers, RichText, Sense, Shape, Stroke, Vec2};
 use schematic::{Component, Kind, Schematic, Text, Wire};
+use serde::{Deserialize, Serialize};
+use session::{Doc, Recovery, Snapshot};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use swiftsim::netlist::tokenize;
 use swiftsim::{Control, PlotKind, SimResult};
 use waveform::WaveView;
@@ -28,6 +31,8 @@ pub fn run(file: Option<String>) -> eframe::Result {
             .with_title("SwiftSim")
             .with_app_id("swiftsim")
             .with_icon(icon),
+        // window geometry, panel sizes and `Settings`
+        persistence_path: Some(config_dir().join("settings.ron")),
         ..Default::default()
     };
     eframe::run_native("SwiftSim", opts, Box::new(move |cc| Ok(Box::new(App::new(cc, file)))))
@@ -46,13 +51,24 @@ enum Tab {
     Log,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Pending {
     New,
     Open,
+    OpenPath(PathBuf),
     Example(usize),
     Quit,
 }
+
+/// Remembered across restarts (window size and panel sizes are kept by eframe itself).
+#[derive(Serialize, Deserialize)]
+struct Settings {
+    dark: bool,
+    show_op: bool,
+    last_dir: Option<PathBuf>,
+}
+
+const AUTOSAVE: Duration = Duration::from_secs(30);
 
 struct Job {
     ctl: Arc<Control>,
@@ -79,11 +95,19 @@ struct App {
     status: String,
     title: String,
     dark: bool,
+    /// Folder the file dialogs start in.
+    last_dir: Option<PathBuf>,
+    rec: Recovery,
+    autosaved: Instant,
+    /// Recovery copy left by a crash, offered once at startup.
+    recover: Option<(PathBuf, Snapshot)>,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext, file: Option<String>) -> App {
-        cc.egui_ctx.set_theme(egui::Theme::Dark);
+        let set = cc.storage.and_then(|s| eframe::get_value::<Settings>(s, eframe::APP_KEY)).unwrap_or(Settings { dark: true, show_op: true, last_dir: None });
+        cc.egui_ctx.set_theme(if set.dark { egui::Theme::Dark } else { egui::Theme::Light });
+        let (rec, orphans) = Recovery::start(&config_dir());
         let lib = lib_setting().and_then(|f| std::fs::read_to_string(f).ok()).map(|s| s.trim().to_string());
         swiftsim::netlist::set_ltspice_lib(lib.filter(|s| !s.is_empty()).map(PathBuf::from));
         let mut app = App {
@@ -103,8 +127,13 @@ impl App {
             allow_close: false,
             status: "Ready. Pick a part on the left (or press R, C, L, V, G, W…), press F5 to simulate.".into(),
             title: String::new(),
-            dark: true,
+            dark: set.dark,
+            last_dir: set.last_dir,
+            rec,
+            autosaved: Instant::now(),
+            recover: orphans.into_iter().find_map(|f| Some((f.clone(), session::read(&f).ok()?))),
         };
+        app.ed.show_op = set.show_op;
         match file {
             Some(f) => app.open_path(PathBuf::from(f)),
             None => app.ed.load(examples()[0].1.clone()),
@@ -149,6 +178,7 @@ impl App {
             self.tab = Tab::Log;
         }
         self.status = format!("Opened {}", p.display());
+        self.remember(&p);
         self.path = Some(p);
         self.notes.clear();
         self.results = None;
@@ -164,6 +194,7 @@ impl App {
             }
         };
         let (s, skipped) = asc::import(&asc::decode(&bytes), p.parent());
+        self.remember(&p);
         self.mode = Mode::Schematic;
         self.ed.load(s);
         self.notes = skipped.iter().map(|n| format!("warning: LTspice symbol '{n}' has no SwiftSim equivalent and no subcircuit .asy for it was found (next to the schematic or in LTspice's lib/sym); it was left out (its nets are open)")).collect();
@@ -186,7 +217,7 @@ impl App {
         let path = match (&self.path, as_new) {
             (Some(p), false) => p.clone(),
             _ => {
-                let d = rfd::FileDialog::new();
+                let d = self.dialog();
                 let d = if schematic { d.add_filter("SwiftSim schematic", &["sws"]).set_file_name("circuit.sws") } else { d.add_filter("SPICE netlist", &["cir", "net", "sp", "spi"]).set_file_name("circuit.cir") };
                 match d.save_file() {
                     Some(p) => p,
@@ -198,12 +229,61 @@ impl App {
         match std::fs::write(&path, data) {
             Ok(()) => {
                 self.status = format!("Saved {}", path.display());
+                self.remember(&path);
                 self.path = Some(path);
                 self.ed.dirty = false;
                 self.net_dirty = false;
             }
             Err(e) => self.status = format!("Save failed: {e}"),
         }
+    }
+
+    /// File dialog starting in the last folder used.
+    fn dialog(&self) -> rfd::FileDialog {
+        let d = rfd::FileDialog::new();
+        match &self.last_dir {
+            Some(dir) => d.set_directory(dir),
+            None => d,
+        }
+    }
+
+    fn remember(&mut self, p: &std::path::Path) {
+        session::add_recent(&config_dir(), p);
+        self.last_dir = p.parent().map(|d| d.to_path_buf());
+    }
+
+    /// Writes the recovery copy. Only ever to the config folder, never to the user's file.
+    fn autosave(&mut self) {
+        self.autosaved = Instant::now();
+        let doc = match self.mode {
+            Mode::Schematic => Doc::Schematic(self.ed.sch.clone()),
+            Mode::Netlist => Doc::Netlist(self.net_text.clone()),
+        };
+        if let Err(e) = self.rec.write(&Snapshot { path: self.path.clone(), doc }) {
+            self.status = format!("Autosave failed: {e}");
+        }
+    }
+
+    fn restore(&mut self, s: Snapshot) {
+        match s.doc {
+            Doc::Schematic(sch) => {
+                self.mode = Mode::Schematic;
+                self.ed.load(sch);
+                self.ed.dirty = true;
+            }
+            Doc::Netlist(t) => {
+                self.mode = Mode::Netlist;
+                self.net_text = t;
+                self.net_dirty = true;
+                self.tab = Tab::Log;
+            }
+        }
+        let name = s.path.as_ref().map_or("untitled".into(), |p| p.display().to_string());
+        self.status = format!("Restored unsaved changes to {name} — not saved yet (Ctrl+S)");
+        self.path = s.path;
+        self.notes.clear();
+        self.results = None;
+        self.waves.traces.clear();
     }
 
     fn do_pending(&mut self, p: Pending, ctx: &egui::Context) {
@@ -217,7 +297,8 @@ impl App {
                 self.waves.traces.clear();
             }
             Pending::Open => {
-                if let Some(p) = rfd::FileDialog::new()
+                if let Some(p) = self
+                    .dialog()
                     .add_filter("All supported", &["sws", "asc", "cir", "net", "sp", "spi", "txt"])
                     .add_filter("SwiftSim schematic", &["sws"])
                     .add_filter("LTspice schematic", &["asc"])
@@ -227,6 +308,7 @@ impl App {
                     self.open_path(p);
                 }
             }
+            Pending::OpenPath(p) => self.open_path(p),
             Pending::Example(i) => {
                 self.mode = Mode::Schematic;
                 self.ed.load(examples()[i].1.clone());
@@ -256,6 +338,9 @@ impl App {
     fn run_sim(&mut self, ctx: &egui::Context) {
         if self.job.is_some() {
             return;
+        }
+        if self.dirty() {
+            self.autosave();
         }
         let text = self.netlist_text();
         let base = self.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf()));
@@ -338,6 +423,19 @@ impl App {
                     self.request(Pending::Open, &ctx);
                     ui.close();
                 }
+                ui.menu_button("Open recent", |ui| {
+                    let recent = session::recent(&config_dir());
+                    if recent.is_empty() {
+                        ui.weak("No recent files");
+                    }
+                    for p in recent {
+                        let name = p.file_name().map_or(p.display().to_string(), |n| n.to_string_lossy().to_string());
+                        if ui.button(name).on_hover_text(p.display().to_string()).clicked() {
+                            self.request(Pending::OpenPath(p), &ctx);
+                            ui.close();
+                        }
+                    }
+                });
                 if ui.button("Save                Ctrl+S").clicked() {
                     self.save(false);
                     ui.close();
@@ -348,7 +446,7 @@ impl App {
                 }
                 ui.separator();
                 if self.mode == Mode::Schematic && ui.button("Export SPICE netlist…").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().add_filter("SPICE netlist", &["cir"]).set_file_name("circuit.cir").save_file() {
+                    if let Some(p) = self.dialog().add_filter("SPICE netlist", &["cir"]).set_file_name("circuit.cir").save_file() {
                         let t = self.ed.netlist().text.clone();
                         self.status = match std::fs::write(&p, t) {
                             Ok(()) => format!("Exported {}", p.display()),
@@ -823,8 +921,36 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // a GUI panic still leaves an up-to-date recovery copy for the next start
+        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.frame(ui))) {
+            if self.dirty() {
+                self.autosave();
+            }
+            std::panic::resume_unwind(p);
+        }
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        eframe::set_value(storage, eframe::APP_KEY, &Settings { dark: self.dark, show_op: self.ed.show_op, last_dir: self.last_dir.clone() });
+    }
+
+    fn on_exit(&mut self) {
+        self.rec.close();
+    }
+}
+
+impl App {
+    fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
+        if !self.dirty() {
+            self.rec.remove();
+        } else {
+            if self.autosaved.elapsed() >= AUTOSAVE {
+                self.autosave();
+            }
+            ctx.request_repaint_after(AUTOSAVE);
+        }
         // global shortcuts
         if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F5)) {
             self.run_sim(&ctx);
@@ -889,7 +1015,41 @@ impl eframe::App for App {
             }
         });
 
-        if let Some(p) = self.confirm {
+        if let Some((f, s)) = &self.recover {
+            let mut answer = None;
+            egui::Modal::new(egui::Id::unique("recover")).show(&ctx, |ui| {
+                ui.heading("Recover unsaved work?");
+                ui.label("SwiftSim closed without saving last time. A recovery copy of the unsaved document was found:");
+                ui.monospace(s.path.as_ref().map_or("untitled".into(), |p| p.display().to_string()));
+                ui.weak("Restoring opens it with unsaved changes; your file on disk stays as it was until you save.");
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Restore").clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button("Discard").clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+            match answer {
+                Some(true) => {
+                    let f = f.clone();
+                    self.recover = None;
+                    match self.rec.adopt(&f) {
+                        Ok(s) => self.restore(s),
+                        Err(e) => self.status = format!("Cannot restore {}: {e}", f.display()),
+                    }
+                }
+                Some(false) => {
+                    self.rec.discard(f);
+                    self.recover = None;
+                }
+                None => {}
+            }
+        }
+
+        if let Some(p) = self.confirm.clone() {
             let mut close = false;
             egui::Modal::new(egui::Id::unique("confirm")).show(&ctx, |ui| {
                 ui.heading("Unsaved changes");
@@ -900,7 +1060,7 @@ impl eframe::App for App {
                         self.save(false);
                         close = true;
                         if !self.dirty() {
-                            self.do_pending(p, &ctx);
+                            self.do_pending(p.clone(), &ctx);
                         }
                     }
                     if ui.button("Discard").clicked() {
@@ -921,11 +1081,18 @@ impl eframe::App for App {
     }
 }
 
-/// Saved LTspice library folder: `%APPDATA%\SwiftSim` or `$XDG_CONFIG_HOME`/`~/.config/swiftsim`.
-fn lib_setting() -> Option<PathBuf> {
+/// Settings folder: `%APPDATA%\SwiftSim` or `$XDG_CONFIG_HOME`/`~/.config/swiftsim` (temp folder as a last resort).
+fn config_dir() -> PathBuf {
     let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
-    let dir = env("APPDATA").map(|d| d.join("SwiftSim")).or_else(|| env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config"))).map(|d| d.join("swiftsim")))?;
-    Some(dir.join("ltspice-lib.txt"))
+    env("APPDATA")
+        .map(|d| d.join("SwiftSim"))
+        .or_else(|| env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config"))).map(|d| d.join("swiftsim")))
+        .unwrap_or_else(|| std::env::temp_dir().join("swiftsim"))
+}
+
+/// Saved LTspice library folder.
+fn lib_setting() -> Option<PathBuf> {
+    Some(config_dir().join("ltspice-lib.txt"))
 }
 
 fn is_analysis(l: &str) -> bool {
