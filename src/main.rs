@@ -6,6 +6,16 @@ use std::path::Path;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Release builds use the GUI subsystem (no console), so CLI modes borrow the parent shell's console to print.
+    #[cfg(windows)]
+    if args.iter().any(|a| matches!(a.as_str(), "-b" | "--batch" | "-h" | "--help")) {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn AttachConsole(pid: u32) -> i32;
+        }
+        // u32::MAX = ATTACH_PARENT_PROCESS; failure (no parent console) is harmless.
+        unsafe { AttachConsole(u32::MAX) };
+    }
     if let Some(i) = args.iter().position(|a| a == "-b" || a == "--batch") {
         let Some(file) = args.get(i + 1) else {
             eprintln!("usage: swiftsim -b <netlist> [-o out.csv]");
