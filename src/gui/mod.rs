@@ -1,5 +1,6 @@
 //! Desktop application shell.
 
+mod asc;
 mod editor;
 mod schematic;
 mod waveform;
@@ -108,6 +109,9 @@ impl App {
     }
 
     fn open_path(&mut self, p: PathBuf) {
+        if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("asc")) {
+            return self.import_asc(p);
+        }
         let text = match std::fs::read_to_string(&p) {
             Ok(t) => t,
             Err(e) => {
@@ -134,6 +138,29 @@ impl App {
         }
         self.status = format!("Opened {}", p.display());
         self.path = Some(p);
+        self.results = None;
+        self.waves.traces.clear();
+    }
+
+    fn import_asc(&mut self, p: PathBuf) {
+        let bytes = match std::fs::read(&p) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Cannot open {}: {e}", p.display());
+                return;
+            }
+        };
+        let (s, skipped) = asc::import(&asc::decode(&bytes));
+        self.mode = Mode::Schematic;
+        self.ed.load(s);
+        self.status = if skipped.is_empty() {
+            format!("Imported LTspice schematic {}", p.display())
+        } else {
+            format!("Imported {} — WARNING: unsupported LTspice symbols left out (their nets are open): {}", p.display(), skipped.join(", "))
+        };
+        // save next to the .asc as .sws (keeps relative .lib/.include paths working), never over the .asc itself
+        let sws = p.with_extension("sws");
+        self.path = (!sws.exists()).then_some(sws);
         self.results = None;
         self.waves.traces.clear();
     }
@@ -174,8 +201,9 @@ impl App {
             }
             Pending::Open => {
                 if let Some(p) = rfd::FileDialog::new()
-                    .add_filter("All supported", &["sws", "cir", "net", "sp", "spi", "txt"])
+                    .add_filter("All supported", &["sws", "asc", "cir", "net", "sp", "spi", "txt"])
                     .add_filter("SwiftSim schematic", &["sws"])
+                    .add_filter("LTspice schematic", &["asc"])
                     .add_filter("SPICE netlist", &["cir", "net", "sp", "spi", "txt"])
                     .pick_file()
                 {
