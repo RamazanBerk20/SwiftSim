@@ -4,6 +4,7 @@ pub mod asc;
 mod editor;
 mod schematic;
 mod session;
+pub mod update;
 mod waveform;
 
 use eframe::egui;
@@ -66,6 +67,12 @@ struct Settings {
     dark: bool,
     show_op: bool,
     last_dir: Option<PathBuf>,
+    #[serde(default = "yes")]
+    check_updates: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 const AUTOSAVE: Duration = Duration::from_secs(30);
@@ -101,11 +108,16 @@ struct App {
     autosaved: Instant,
     /// Recovery copy left by a crash, offered once at startup.
     recover: Option<(PathBuf, Snapshot)>,
+    check_updates: bool,
+    /// Newer release found by the update check (cleared by Dismiss).
+    update: Option<update::Release>,
+    /// Running update check and whether the user started it (then "up to date" and errors are shown).
+    update_rx: Option<(Receiver<Result<Option<update::Release>, String>>, bool)>,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext, file: Option<String>) -> App {
-        let set = cc.storage.and_then(|s| eframe::get_value::<Settings>(s, eframe::APP_KEY)).unwrap_or(Settings { dark: true, show_op: true, last_dir: None });
+        let set = cc.storage.and_then(|s| eframe::get_value::<Settings>(s, eframe::APP_KEY)).unwrap_or(Settings { dark: true, show_op: true, last_dir: None, check_updates: true });
         cc.egui_ctx.set_theme(if set.dark { egui::Theme::Dark } else { egui::Theme::Light });
         let (rec, orphans) = Recovery::start(&config_dir());
         let lib = lib_setting().and_then(|f| std::fs::read_to_string(f).ok()).map(|s| s.trim().to_string());
@@ -132,8 +144,14 @@ impl App {
             rec,
             autosaved: Instant::now(),
             recover: orphans.into_iter().find_map(|f| Some((f.clone(), session::read(&f).ok()?))),
+            check_updates: set.check_updates,
+            update: None,
+            update_rx: None,
         };
         app.ed.show_op = set.show_op;
+        if app.check_updates {
+            app.start_update_check(&cc.egui_ctx, false);
+        }
         match file {
             Some(f) => app.open_path(PathBuf::from(f)),
             None => app.ed.load(examples()[0].1.clone()),
@@ -585,6 +603,13 @@ impl App {
                 ui.separator();
                 ui.label("Supported: .op .tran .ac .dc .tf .noise .four .temp .step .meas .param .ic .model .subckt .include/.lib .options");
                 ui.label("Elements: R C L K V I D Q M(level1/VDMOS) E F G H B S X");
+                ui.separator();
+                ui.label(format!("SwiftSim {}", update::VERSION));
+                if ui.button("Check for updates now").clicked() {
+                    self.start_update_check(&ctx, true);
+                    ui.close();
+                }
+                ui.checkbox(&mut self.check_updates, "Check for updates at startup");
             });
         });
     }
@@ -943,7 +968,8 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, eframe::APP_KEY, &Settings { dark: self.dark, show_op: self.ed.show_op, last_dir: self.last_dir.clone() });
+        let set = Settings { dark: self.dark, show_op: self.ed.show_op, last_dir: self.last_dir.clone(), check_updates: self.check_updates };
+        eframe::set_value(storage, eframe::APP_KEY, &set);
     }
 
     fn on_exit(&mut self) {
@@ -952,9 +978,48 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// Asks GitHub for a newer release in the background. Automatic checks stay quiet
+    /// unless they find one; checks the user starts also report "up to date" and errors.
+    fn start_update_check(&mut self, ctx: &egui::Context, manual: bool) {
+        if self.update_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(update::check());
+            ctx.request_repaint();
+        });
+        self.update_rx = Some((rx, manual));
+        if manual {
+            self.status = "Checking for updates…".into();
+        }
+    }
+
+    fn poll_update(&mut self) {
+        let Some((rx, manual)) = &self.update_rx else { return };
+        let manual = *manual;
+        let r = match rx.try_recv() {
+            Ok(r) => r,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("the update check stopped unexpectedly".into()),
+        };
+        self.update_rx = None;
+        match r {
+            Ok(Some(rel)) => {
+                self.status = format!("SwiftSim {} is available (you have {}).", rel.tag, update::VERSION);
+                self.update = Some(rel);
+            }
+            Ok(None) if manual => self.status = format!("SwiftSim {} is up to date.", update::VERSION),
+            Err(e) if manual => self.status = format!("Couldn't check for updates: {e}"),
+            _ => {}
+        }
+    }
+
     fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
+        self.poll_update();
         if !self.dirty() {
             self.rec.remove();
         } else {
@@ -999,6 +1064,17 @@ impl App {
         egui::Panel::top("menu").show(ui, |ui| {
             self.menu(ui);
             self.toolbar(ui);
+            if let Some(rel) = self.update.clone() {
+                ui.horizontal(|ui| {
+                    ui.colored_label(Color32::from_rgb(102, 220, 120), format!("Update available: SwiftSim {} (you have {})", rel.tag, update::VERSION));
+                    if ui.button("View release").clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(&rel.url));
+                    }
+                    if ui.button("Dismiss").clicked() {
+                        self.update = None;
+                    }
+                });
+            }
             ui.add_space(2.0);
         });
         egui::Panel::bottom("status").exact_size(22.0).show(ui, |ui| {

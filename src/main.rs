@@ -25,7 +25,7 @@ fn main() {
         std::process::exit(batch(file, out.map(|s| s.as_str())));
     }
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        println!("SwiftSim {}\n\nusage:\n  swiftsim [file.sws|file.cir]      open the GUI\n  swiftsim -b <netlist> [-o out.csv] batch simulation", env!("CARGO_PKG_VERSION"));
+        println!("SwiftSim {}\n\nusage:\n  swiftsim [file.sws|file.cir]      open the GUI\n  swiftsim -b <netlist> [-o out.csv] batch simulation", gui::update::VERSION);
         return;
     }
     if let Err(e) = gui::run(args.get(1).cloned()) {
