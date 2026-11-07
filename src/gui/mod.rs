@@ -1174,6 +1174,13 @@ impl App {
     }
 }
 
+/// Netlist of a saved schematic (`.sws`), for batch mode.
+pub fn sws_netlist(text: &str) -> Result<String, String> {
+    let mut s: Schematic = serde_json::from_str(text).map_err(|e| format!("not a SwiftSim schematic: {e}"))?;
+    s.upgrade();
+    Ok(s.netlist().text)
+}
+
 /// Settings folder: `%APPDATA%\SwiftSim` or `$XDG_CONFIG_HOME`/`~/.config/swiftsim` (temp folder as a last resort).
 fn config_dir() -> PathBuf {
     let env = |k: &str| std::env::var_os(k).map(PathBuf::from);

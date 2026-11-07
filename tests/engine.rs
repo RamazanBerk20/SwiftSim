@@ -615,3 +615,18 @@ fn flicker_noise_rises_as_one_over_f() {
     let v = sig(p, "v(onoise)");
     close(v[0] / v[1], 10f64.sqrt(), 1e-3);
 }
+
+#[test]
+fn params_and_analysis_can_use_step_variables() {
+    // LTspice style: .param and the analysis line depend on a stepped variable
+    let r = sim("ps\n.param r={k*1k}\n.param tstop={2/f}\n.step param k list 1 2\n.step param f list 1k 2k\nV1 a 0 1\nR1 a 0 {r}\n.tran 0 {tstop}\n.meas tran rr PARAM r\n");
+    assert_eq!(r.plots.len(), 4);
+    for p in &r.plots {
+        let (k, f) = if p.step.contains("k=1 ") { (1.0, 0.0) } else { (2.0, 0.0) };
+        let f = if p.step.ends_with("f=1k") { 1e3 } else { 2e3 } + f;
+        close(sig(p, "i(r1)")[0], 1e-3 / k, 1e-9);
+        close(*p.x.last().unwrap(), 2.0 / f, 1e-9);
+    }
+    let rr: Vec<f64> = r.meas.iter().map(|m| m.2).collect();
+    assert_eq!(rr, [1e3, 1e3, 2e3, 2e3]);
+}

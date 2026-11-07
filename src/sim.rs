@@ -99,8 +99,10 @@ pub fn run(deck: &Deck, ctl: &Control) -> Result<SimResult, String> {
     let t0 = Instant::now();
     let mut res = SimResult::default();
     res.log.extend(deck.warnings.iter().map(|w| format!("warning: {w}")));
-    let global = deck.eval_params(&HashMap::new())?;
-    let an = deck.analysis(&global)?;
+    // .param lines may use .step variables, which only get values per step: provisionally 0 here
+    // (enough to read the .step lines); each step below evaluates everything with its own values
+    let provisional: HashMap<String, f64> = deck.step_names().into_iter().map(|n| (n, 0.0)).collect();
+    let global = deck.eval_params(&provisional)?;
     let (steps, sw) = deck.steps(&global)?;
     res.log.extend(sw.into_iter().map(|w| format!("warning: {w}")));
     let mut combos: Vec<Vec<(String, f64)>> = vec![vec![]];
@@ -111,9 +113,13 @@ pub fn run(deck: &Deck, ctl: &Control) -> Result<SimResult, String> {
             .collect();
     }
     let total = combos.len();
+    // each plot's own parameter values, for .meas
+    let mut scopes = vec![];
     for (ci, combo) in combos.iter().enumerate() {
         let over: HashMap<String, f64> = combo.iter().cloned().collect();
         let label = combo.iter().map(|(k, v)| format!("{k}={}", fmt_si(*v))).collect::<Vec<_>>().join(" ");
+        let scope = deck.eval_params(&over)?;
+        let an = deck.analysis(&scope)?;
         let ckt = deck.build(&over)?;
         if ci == 0 {
             res.log.extend(ckt.warnings.iter().map(|w| format!("warning: {w}")));
@@ -132,7 +138,7 @@ pub fn run(deck: &Deck, ctl: &Control) -> Result<SimResult, String> {
             Analysis::Noise { .. } => res.log.extend(noise_report(&plots[0], &label)),
             Analysis::Tran { .. } => {
                 for l in &deck.four {
-                    match crate::measure::fourier(&l.text, &plots[0], &global) {
+                    match crate::measure::fourier(&l.text, &plots[0], &scope) {
                         Ok(lines) => res.log.extend(lines),
                         Err(e) => res.log.push(format!("line {}: .four: {e}", l.no)),
                     }
@@ -140,11 +146,12 @@ pub fn run(deck: &Deck, ctl: &Control) -> Result<SimResult, String> {
             }
             _ => {}
         }
+        scopes.extend(std::iter::repeat_n(scope, plots.len()));
         res.plots.extend(plots);
     }
     for l in &deck.meas {
-        for p in &res.plots {
-            match crate::measure::measure(&l.text, p, &res.meas, &global) {
+        for (p, scope) in res.plots.iter().zip(&scopes) {
+            match crate::measure::measure(&l.text, p, &res.meas, scope) {
                 Ok(Some((name, v))) => res.meas.push((p.step.clone(), name, v)),
                 Ok(None) => {}
                 Err(e) => res.log.push(format!("line {}: .meas: {e}", l.no)),

@@ -652,6 +652,24 @@ impl Deck {
         })
     }
 
+    /// Names stepped by `.step` lines (parameters, sources, elements), without evaluating their values.
+    pub fn step_names(&self) -> Vec<String> {
+        self.steps
+            .iter()
+            .filter_map(|l| {
+                let t = tokenize(&l.text);
+                let mut i = 1;
+                if t.get(i).is_some_and(|x| matches!(x.as_str(), "lin" | "dec" | "oct")) {
+                    i += 1;
+                }
+                if t.get(i).is_some_and(|x| x == "param") {
+                    i += 1;
+                }
+                t.get(i).cloned()
+            })
+            .collect()
+    }
+
     pub fn steps(&self, sc: &Scope) -> Result<(Vec<Step>, Vec<String>), String> {
         let (mut out, mut warn) = (vec![], vec![]);
         for l in &self.steps {
