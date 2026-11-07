@@ -34,7 +34,7 @@ GitHub Release with generated notes (tags containing `-`, e.g. `v0.2.0-rc1`, bec
 
 ## Build & run
 
-Requires Rust 1.85+ (edition 2024).
+Requires Rust 1.89+ (edition 2024; crash recovery uses `File::try_lock`).
 
 ```bash
 cargo build --release
