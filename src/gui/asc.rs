@@ -92,14 +92,7 @@ fn place(s: &mut Schematic, p: Part) {
     s.comps.push(c);
 }
 
-/// LTspice writes ASCII/Latin-1 (µ as 0xB5) or, in newer versions, UTF-16LE.
-pub fn decode(b: &[u8]) -> String {
-    if b.starts_with(&[0xFF, 0xFE]) || b.get(1) == Some(&0) {
-        let u: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        return String::from_utf16_lossy(&u).trim_start_matches('\u{feff}').to_string();
-    }
-    String::from_utf8(b.to_vec()).unwrap_or_else(|_| b.iter().map(|&c| c as char).collect())
-}
+pub use swiftsim::netlist::decode;
 
 /// Converts an LTspice schematic. Also returns the names of symbols that have
 /// no SwiftSim equivalent (sorted, unique); those parts are left out.

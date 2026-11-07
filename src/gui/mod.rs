@@ -1,6 +1,6 @@
 //! Desktop application shell.
 
-mod asc;
+pub mod asc;
 mod editor;
 mod schematic;
 mod waveform;
@@ -63,6 +63,8 @@ struct App {
     waves: WaveView,
     results: Option<SimResult>,
     log: Vec<String>,
+    /// Import warnings, kept at the top of the Log until another file is loaded.
+    notes: Vec<String>,
     job: Option<Job>,
     filter: String,
     confirm: Option<Pending>,
@@ -75,6 +77,8 @@ struct App {
 impl App {
     fn new(cc: &eframe::CreationContext, file: Option<String>) -> App {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
+        let lib = lib_setting().and_then(|f| std::fs::read_to_string(f).ok()).map(|s| s.trim().to_string());
+        swiftsim::netlist::set_ltspice_lib(lib.filter(|s| !s.is_empty()).map(PathBuf::from));
         let mut app = App {
             ed: Editor::default(),
             mode: Mode::Schematic,
@@ -85,6 +89,7 @@ impl App {
             waves: WaveView::default(),
             results: None,
             log: vec![],
+            notes: vec![],
             job: None,
             filter: String::new(),
             confirm: None,
@@ -112,8 +117,8 @@ impl App {
         if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("asc")) {
             return self.import_asc(p);
         }
-        let text = match std::fs::read_to_string(&p) {
-            Ok(t) => t,
+        let text = match std::fs::read(&p) {
+            Ok(b) => swiftsim::netlist::decode(&b),
             Err(e) => {
                 self.status = format!("Cannot open {}: {e}", p.display());
                 return;
@@ -138,6 +143,7 @@ impl App {
         }
         self.status = format!("Opened {}", p.display());
         self.path = Some(p);
+        self.notes.clear();
         self.results = None;
         self.waves.traces.clear();
     }
@@ -153,9 +159,12 @@ impl App {
         let (s, skipped) = asc::import(&asc::decode(&bytes));
         self.mode = Mode::Schematic;
         self.ed.load(s);
+        self.notes = skipped.iter().map(|n| format!("warning: LTspice symbol '{n}' has no SwiftSim equivalent and was left out (its nets are open)")).collect();
+        self.log = self.notes.clone();
         self.status = if skipped.is_empty() {
             format!("Imported LTspice schematic {}", p.display())
         } else {
+            self.tab = Tab::Log;
             format!("Imported {} — WARNING: unsupported LTspice symbols left out (their nets are open): {}", p.display(), skipped.join(", "))
         };
         // save next to the .asc as .sws (keeps relative .lib/.include paths working), never over the .asc itself
@@ -196,6 +205,7 @@ impl App {
                 self.mode = Mode::Schematic;
                 self.ed.load(Schematic::default());
                 self.path = None;
+                self.notes.clear();
                 self.results = None;
                 self.waves.traces.clear();
             }
@@ -214,6 +224,7 @@ impl App {
                 self.mode = Mode::Schematic;
                 self.ed.load(examples()[i].1.clone());
                 self.path = None;
+                self.notes.clear();
                 self.results = None;
                 self.waves.traces.clear();
             }
@@ -266,7 +277,7 @@ impl App {
                 self.job = None;
                 match r {
                     Ok(res) => {
-                        self.log = res.log.clone();
+                        self.log = self.notes.iter().chain(&res.log).cloned().collect();
                         let kind = res.plots.first().map(|p| p.kind);
                         self.ed.op_values.clear();
                         if kind == Some(PlotKind::Op) {
@@ -299,7 +310,7 @@ impl App {
                         self.results = Some(res);
                     }
                     Err(e) => {
-                        self.log = vec![format!("error: {e}")];
+                        self.log = self.notes.iter().cloned().chain([format!("error: {e}")]).collect();
                         self.tab = Tab::Log;
                         self.status = format!("Simulation failed: {e}");
                     }
@@ -405,6 +416,32 @@ impl App {
                     if let Some(j) = &self.job {
                         j.ctl.cancel.store(true, Ordering::Relaxed);
                     }
+                    ui.close();
+                }
+                ui.separator();
+                let manual = lib_setting().is_some_and(|f| f.exists());
+                ui.weak(match swiftsim::netlist::ltspice_lib() {
+                    Some(p) => format!("LTspice library: {}{}", p.display(), if manual { "" } else { " (auto-detected)" }),
+                    None => "LTspice library: not found (LTspice's own models are unavailable)".into(),
+                });
+                if ui.button("Choose LTspice library folder…").on_hover_text("LTspice's lib folder, with cmp/ and sub/ inside. Models missing from the netlist are read from it.").clicked() {
+                    if let Some(d) = rfd::FileDialog::new().pick_folder() {
+                        let saved = lib_setting().ok_or("no config folder".to_string()).and_then(|f| {
+                            std::fs::create_dir_all(f.parent().unwrap_or(&f)).and_then(|_| std::fs::write(&f, d.to_string_lossy().as_bytes())).map_err(|e| e.to_string())
+                        });
+                        self.status = match saved {
+                            Ok(()) => format!("LTspice library set to {}", d.display()),
+                            Err(e) => format!("LTspice library set to {} for this session (not saved: {e})", d.display()),
+                        };
+                        swiftsim::netlist::set_ltspice_lib(Some(d));
+                    }
+                    ui.close();
+                }
+                if manual && ui.button("Auto-detect LTspice library").clicked() {
+                    if let Some(f) = lib_setting() {
+                        let _ = std::fs::remove_file(f);
+                    }
+                    swiftsim::netlist::set_ltspice_lib(None);
                     ui.close();
                 }
             });
@@ -875,6 +912,13 @@ impl eframe::App for App {
             }
         }
     }
+}
+
+/// Saved LTspice library folder: `%APPDATA%\SwiftSim` or `$XDG_CONFIG_HOME`/`~/.config/swiftsim`.
+fn lib_setting() -> Option<PathBuf> {
+    let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
+    let dir = env("APPDATA").map(|d| d.join("SwiftSim")).or_else(|| env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config"))).map(|d| d.join("swiftsim")))?;
+    Some(dir.join("ltspice-lib.txt"))
 }
 
 fn is_analysis(l: &str) -> bool {
