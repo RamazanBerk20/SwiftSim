@@ -196,6 +196,9 @@ impl Mode {
     }
 }
 
+/// Newton update (relative to its tolerance) below which the converged iterate's device state is kept.
+const STATE_REFRESH: f64 = 1e-2;
+
 struct Engine {
     c: Circuit,
     m: Matrix<f64>,
@@ -264,11 +267,12 @@ impl Engine {
             if !self.xn.iter().all(|v| v.is_finite()) {
                 return Err("numerical overflow".into());
             }
-            let conv = !lim
-                && (0..self.c.n).all(|i| {
-                    let (a, b) = (self.xn[i + 1], self.x[i + 1]);
-                    (a - b).abs() <= reltol * a.abs().max(b.abs()) + if self.c.is_current[i] { abstol } else { vntol }
-                });
+            // largest update relative to its tolerance (<= 1: converged)
+            let step = (0..self.c.n).fold(0.0f64, |w, i| {
+                let (a, b) = (self.xn[i + 1], self.x[i + 1]);
+                w.max((a - b).abs() / (reltol * a.abs().max(b.abs()) + if self.c.is_current[i] { abstol } else { vntol }))
+            });
+            let conv = !lim && step <= 1.0;
             std::mem::swap(&mut self.x, &mut self.xn);
             if !self.c.nonlinear {
                 // linear: exact after one solve; refresh state at the solution
@@ -276,6 +280,12 @@ impl Engine {
                 return Ok(1);
             }
             if conv && it > 0 {
+                // device state (charges, capacitor currents) is still from the previous iterate; unless the last
+                // update was negligible, re-evaluate it at the solution, or the time step leaves a0·C·Δx in the
+                // trapezoidal current history (diode recovery and BJT storage times drifted with step count)
+                if step > STATE_REFRESH {
+                    self.load(md, false);
+                }
                 return Ok(it + 1);
             }
         }

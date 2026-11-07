@@ -1,0 +1,10 @@
+* Saturating BJT inverter: storage time from TR, edges from CJE/CJC
+.include models.inc
+VCC vcc 0 5
+VIN in 0 PULSE(0 5 1u 10n 10n 5u 10u)
+RB in b 10k
+Q1 c b 0 QN
+RC vcc c 1k
+CL c 0 10p
+.tran 10n 20u 0 10n
+.end

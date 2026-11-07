@@ -1,0 +1,8 @@
+* Level-1 NMOS output curves with body bias, incl. reversed Vds (source/drain swap)
+.include models.inc
+VDS d 0 0
+VGS g 0 0
+VBS b 0 -1
+M1 d g 0 b NM W=10u L=2u
+.dc VDS -0.5 5 0.05 VGS 1 5 1
+.end

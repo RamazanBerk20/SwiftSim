@@ -1,0 +1,6 @@
+* RC charging from a pulse train
+V1 in 0 PULSE(0 5 100u 1u 1u 400u 1m)
+R1 in out 1k
+C1 out 0 100n
+.tran 1u 2m 0 2u
+.end

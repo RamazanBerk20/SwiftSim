@@ -1,0 +1,20 @@
+* E/F/G/H, POLY and B sources, DC sweep
+V1 a 0 0
+VS a b 0
+R1 b 0 1k
+E1 e 0 a 0 2.5
+R2 e 0 1k
+G1 0 g a 0 1m
+R3 g 0 1k
+F1 0 f VS 2
+R4 f 0 1k
+H1 h 0 VS 500
+R5 h 0 1k
+E2 p 0 POLY(2) a 0 e 0 0.1 1 0.5 0.2 0.05 0.01
+R6 p 0 1k
+B1 b1 0 V=V(a)*V(a)*0.3-0.5*V(e)
+R7 b1 0 1k
+B2 0 b2 I=1m*tanh(V(a))
+R8 b2 0 1k
+.dc V1 -3 3 0.05
+.end

@@ -1,0 +1,12 @@
+* TL072 relaxation oscillator (Schmitt trigger + RC), compared by period
+.include ../models/TL072.301
+Vp vp 0 15
+Vn vn 0 -15
+R1 out p 10k
+R2 p 0 10k
+Rt out m 10k
+Ct m 0 10n
+X1 p m vp vn out TL072
+.ic V(m)=-1
+.tran 1u 2m 0 0.5u
+.end

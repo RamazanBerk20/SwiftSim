@@ -1,0 +1,21 @@
+* Five-stage CMOS ring oscillator (compared by period)
+.include models.inc
+VDD vdd 0 3.3
+MN1 n2 n1 0 0 NM W=2u L=1u
+MP1 n2 n1 vdd vdd PM W=5u L=1u
+C1 n2 0 100f
+MN2 n3 n2 0 0 NM W=2u L=1u
+MP2 n3 n2 vdd vdd PM W=5u L=1u
+C2 n3 0 100f
+MN3 n4 n3 0 0 NM W=2u L=1u
+MP3 n4 n3 vdd vdd PM W=5u L=1u
+C3 n4 0 100f
+MN4 n5 n4 0 0 NM W=2u L=1u
+MP4 n5 n4 vdd vdd PM W=5u L=1u
+C4 n5 0 100f
+MN5 n1 n5 0 0 NM W=2u L=1u
+MP5 n1 n5 vdd vdd PM W=5u L=1u
+C5 n1 0 100f
+.ic V(n1)=0
+.tran 0.01n 30n 0 0.01n
+.end

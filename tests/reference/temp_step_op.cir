@@ -1,0 +1,17 @@
+* Diode, BJT, level-1 MOSFET and resistor tempco across temperature (.step temp)
+.include models.inc
+VCC vcc 0 5
+R1 vcc d 10k
+D1 d 0 DSIG
+R2 vcc b 100k
+Q1 c b 0 QN
+RC vcc c 1k
+R3 vcc g 47k
+R4 g 0 33k
+M1 dm g 0 0 NM W=10u L=2u
+RD vcc dm 4.7k
+R5 vcc t 1k tc1=3m tc2=1u
+R6 t 0 1k
+.step temp list -40 0 27 85 125
+.op
+.end

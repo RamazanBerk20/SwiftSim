@@ -1,0 +1,11 @@
+* PNP current mirror and emitter follower, operating point
+.include models.inc
+VCC vcc 0 9
+Q1 m m vcc QP
+Q2 o m vcc QP
+Rref m 0 8.2k
+RL o 0 2.2k
+Q3 vcc o f QN
+Rf f 0 1k
+.op
+.end

@@ -1,0 +1,4 @@
+* Common-emitter amplifier, AC
+.include bjt_ce_amp.inc
+.ac dec 20 1 1g
+.end

@@ -1,0 +1,12 @@
+* BJT differential pair with tail current source, DC transfer
+.include models.inc
+VCC vcc 0 10
+VEE vee 0 -10
+VIN inp 0 0
+Q1 c1 inp e QN
+Q2 c2 0 e QN
+RC1 vcc c1 10k
+RC2 vcc c2 10k
+IEE e vee 1m
+.dc VIN -0.2 0.2 1m
+.end

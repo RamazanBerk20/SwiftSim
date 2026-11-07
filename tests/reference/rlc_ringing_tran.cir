@@ -1,0 +1,7 @@
+* Underdamped series RLC step response (zeta = 0.16)
+V1 in 0 PULSE(0 1 10u 100n 100n 1 2)
+R1 in a 10
+L1 a out 1m
+C1 out 0 1u
+.tran 1u 1m 0 0.5u
+.end

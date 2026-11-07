@@ -1,0 +1,9 @@
+* Coupled inductors (K = 0.98) driving a resistive load
+V1 in 0 SIN(0 10 1k 0 0 0)
+R1 in p 10
+L1 p 0 10m
+L2 s 0 2.5m
+K1 L1 L2 0.98
+RL s 0 100
+.tran 10u 5m 0 5u
+.end

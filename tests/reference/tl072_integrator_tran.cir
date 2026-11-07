@@ -1,0 +1,11 @@
+* TL072 integrator with DC feedback resistor, square wave in
+.include ../models/TL072.301
+Vp vp 0 15
+Vn vn 0 -15
+V1 in 0 PULSE(-1 1 0 1u 1u 499u 1m)
+Rin in m 10k
+Cf m out 10n
+Rf m out 1meg
+X1 0 m vp vn out TL072
+.tran 5u 5m 0 2u
+.end

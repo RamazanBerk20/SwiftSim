@@ -1,0 +1,9 @@
+* Signal diode and 5.1 V zener I-V, DC sweep through forward and breakdown
+.include models.inc
+V1 a 0 0
+R1 a d 100
+D1 d 0 DSIG
+R2 a z 100
+D2 0 z DZ5V1
+.dc V1 -10 10 0.05
+.end

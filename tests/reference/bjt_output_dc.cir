@@ -1,0 +1,7 @@
+* NPN output characteristics, nested DC sweep (Vce inner, Ib outer)
+.include models.inc
+IB 0 b 10u
+VCE c 0 0
+Q1 c b 0 QN
+.dc VCE 0 10 0.05 IB 10u 50u 10u
+.end

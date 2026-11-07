@@ -1,0 +1,8 @@
+* Half-wave rectifier with reservoir capacitor
+.include models.inc
+V1 in 0 SIN(0 10 50 0 0 0)
+D1 in out DPWR
+C1 out 0 100u
+RL out 0 1k
+.tran 0.1m 60m 0 20u
+.end

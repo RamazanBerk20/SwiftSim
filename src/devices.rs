@@ -9,10 +9,11 @@ use crate::expr::{Env, Expr};
 use crate::solver::{C64, Matrix};
 use std::collections::HashMap;
 
+/// Boltzmann constant over electron charge, V/K (CODATA 2014, the values ngspice uses;
+/// SPICE3's 1.3806226e-23/1.6021918e-19 shifts junction currents by ~3e-4).
+pub const KOQ: f64 = 1.38064852e-23 / 1.6021766208e-19;
 /// Thermal voltage kT/q at 27 °C.
-pub const VT: f64 = 0.025864186;
-/// Boltzmann constant over electron charge (SPICE3 values), V/K.
-pub const KOQ: f64 = 1.3806226e-23 / 1.6021918e-19;
+pub const VT: f64 = KOQ * 300.15;
 /// SPICE reference temperature for the bandgap and junction formulas (27 °C).
 const TREF: f64 = 300.15;
 
@@ -389,7 +390,12 @@ pub enum Wave {
     Sffm { vo: f64, va: f64, fc: f64, mdi: f64, fs: f64 },
 }
 
+/// PULSE rise/fall time used when the netlist gives 0 (explicit edges are kept as written).
 const MIN_EDGE: f64 = 1e-9;
+
+fn edge(t: f64) -> f64 {
+    if t > 0.0 { t } else { MIN_EDGE }
+}
 
 impl Wave {
     pub fn parse(kind: &str, a: &[f64]) -> Result<Wave, String> {
@@ -439,7 +445,7 @@ impl Wave {
                 if t < td {
                     return v1;
                 }
-                let (tr, tf) = (tr.max(MIN_EDGE), tf.max(MIN_EDGE));
+                let (tr, tf) = (edge(tr), edge(tf));
                 let mut tt = t - td;
                 if per > 0.0 {
                     if ncyc > 0.0 && tt >= per * ncyc {
@@ -497,7 +503,7 @@ impl Wave {
     pub fn breakpoints(&self, tstop: f64, out: &mut Vec<f64>) {
         match *self {
             Wave::Pulse { td, tr, tf, pw, per, ncyc, .. } => {
-                let (tr, tf) = (tr.max(MIN_EDGE), tf.max(MIN_EDGE));
+                let (tr, tf) = (edge(tr), edge(tf));
                 let mut k = 0.0;
                 loop {
                     let b = td + k * per;
@@ -1268,6 +1274,8 @@ pub struct MosModel {
     pub cgd: f64,
     pub cbd: f64,
     pub cbs: f64,
+    /// VDMOS subthreshold slope KSUBTHRES (V); 0 = hard cutoff.
+    pub ksub: f64,
 }
 
 impl MosModel {
@@ -1296,6 +1304,17 @@ pub struct Mos {
     pub st: usize,
     pub vgs_old: f64,
     pub vds_old: f64,
+    /// Level-1 bulk-drain and bulk-source junctions, see `mos_junction` (empty for VDMOS/JFET).
+    pub bulk: Vec<Diode>,
+}
+
+/// SPICE level-1 bulk junction from `a` to `k` (NMOS: bulk → drain/source): IS moved from
+/// `tnom` to `t` (kelvin) with the MOS1 rule IS·exp(Eg(tnom)/vt(tnom) − Eg(t)/vt(t)).
+pub fn mos_junction(name: String, a: usize, k: usize, is: f64, t: f64, tnom: f64) -> Diode {
+    let vt = KOQ * t;
+    let is = is * (egap(tnom) / (KOQ * tnom) - egap(t) / vt).exp();
+    let md = DiodeModel { is, n: 1.0, cjo: 0.0, vj: 1.0, m: 0.5, tt: 0.0, bv: f64::INFINITY, ibv: 1e-3, nbv: 1.0, fc: 0.5, vt };
+    Diode { name, a, k, md, s: 0, vd_old: 0.0 }
 }
 
 impl Mos {
@@ -1311,8 +1330,17 @@ impl Mos {
             ((sphi - vbs / (2.0 * sphi)).max(0.0), 1.0 / (2.0 * sphi))
         };
         let vth = vto + md.gamma * (sarg - sphi);
-        let vgst = vgs - vth;
-        if vgst <= 0.0 {
+        let mut vgst = vgs - vth;
+        // ngspice VDMOS subthreshold: Vgst -> k·ln(1 + exp(Vgst/k))
+        let mut dvgst = 1.0;
+        if md.ksub > 0.0 {
+            let x = vgst / md.ksub;
+            if x < 40.0 {
+                let e = x.exp();
+                vgst = md.ksub * e.ln_1p();
+                dvgst = e / (1.0 + e);
+            }
+        } else if vgst <= 0.0 {
             return (0.0, 0.0, 0.0, 0.0);
         }
         let l = 1.0 + md.lambda * vds;
@@ -1322,6 +1350,7 @@ impl Mos {
         } else {
             (b / 2.0 * vgst * vgst * l, b * vgst * l, b / 2.0 * vgst * vgst * md.lambda)
         };
+        let gm = gm * dvgst;
         (ids, gm, gds, gm * md.gamma * dsarg)
     }
     /// Returns ((drain', source') nodes, normalized voltages, model outputs).
@@ -1348,6 +1377,9 @@ impl Device for Mos {
     }
     fn setup(&mut self, s: &mut Setup) {
         self.st = s.state(8);
+        for j in &mut self.bulk {
+            j.setup(s);
+        }
     }
     fn load(&mut self, m: &mut Matrix<f64>, c: &LoadCtx, st: &mut [f64]) -> bool {
         let p = self.md.pol;
@@ -1381,9 +1413,15 @@ impl Device for Mos {
         let vbs_a = c.x[b] - c.x[s];
         stamp_q(m, c, st, self.st + 4, b, d, md.cbd * vbd, md.cbd, vbd);
         stamp_q(m, c, st, self.st + 6, b, s, md.cbs * vbs_a, md.cbs, vbs_a);
-        !c.init && ((vgs - rgs).abs() > 1e-9 || (vds - rds).abs() > 1e-9)
+        // junctions start from zero bias, not the diode's forward vcrit (SPICE starts MOS at vbs = -1)
+        let jc = LoadCtx { init: false, ..*c };
+        let mut lim = false;
+        for j in &mut self.bulk {
+            lim |= j.load(m, &jc, st);
+        }
+        lim || !c.init && ((vgs - rgs).abs() > 1e-9 || (vds - rds).abs() > 1e-9)
     }
-    fn load_ac(&self, m: &mut Matrix<C64>, x: &[f64], w: f64, _st: &[f64]) {
+    fn load_ac(&self, m: &mut Matrix<C64>, x: &[f64], w: f64, st: &[f64]) {
         let (vgs, vds, vbs) = self.raw(x);
         let ((dn, sn), _, (_, gm, gds, gmbs)) = self.bias(vgs, vds, vbs);
         m.vccs(dn, sn, self.g, sn, C64::from(gm));
@@ -1393,6 +1431,9 @@ impl Device for Mos {
         m.g(self.g, self.d, jw(w, self.md.cgd));
         m.g(self.b, self.d, jw(w, self.md.cbd));
         m.g(self.b, self.s, jw(w, self.md.cbs));
+        for j in &self.bulk {
+            j.load_ac(m, x, w, st);
+        }
     }
     fn current_names(&self) -> Vec<String> {
         ["id", "ig", "is"].iter().map(|p| format!("{p}({})", self.name)).collect()
@@ -1401,13 +1442,18 @@ impl Device for Mos {
         let (vgs, vds, vbs) = self.raw(x);
         let ((dn, _), _, (ids, ..)) = self.bias(vgs, vds, vbs);
         let ich = if dn == self.d { self.md.pol * ids } else { -self.md.pol * ids };
-        let (igs, igd, ibd, ibs) = (st[self.st + 1], st[self.st + 3], st[self.st + 5], st[self.st + 7]);
+        let (igs, igd, mut ibd, mut ibs) = (st[self.st + 1], st[self.st + 3], st[self.st + 5], st[self.st + 7]);
+        // bulk junction currents, bulk -> drain / source
+        if let [jd, js] = &self.bulk[..] {
+            ibd += self.md.pol * jd.currents(x, st)[0];
+            ibs += self.md.pol * js.currents(x, st)[0];
+        }
         let id = ich - igd - ibd;
         let ig = igs + igd;
         let is = -ich - igs - ibs;
         vec![id, ig, is]
     }
-    fn ac_currents(&self, x: &[f64], v: &[C64], w: f64, _st: &[f64]) -> Vec<C64> {
+    fn ac_currents(&self, x: &[f64], v: &[C64], w: f64, st: &[f64]) -> Vec<C64> {
         let (vgs, vds, vbs) = self.raw(x);
         let ((dn, sn), _, (_, gm, gds, gmbs)) = self.bias(vgs, vds, vbs);
         let mut ich = (v[self.g] - v[sn]) * C64::from(gm) + (v[dn] - v[sn]) * C64::from(gds) + (v[self.b] - v[sn]) * C64::from(gmbs);
@@ -1416,8 +1462,12 @@ impl Device for Mos {
         }
         let igs = (v[self.g] - v[self.s]) * jw(w, self.md.cgs);
         let igd = (v[self.g] - v[self.d]) * jw(w, self.md.cgd);
-        let ibd = (v[self.b] - v[self.d]) * jw(w, self.md.cbd);
-        let ibs = (v[self.b] - v[self.s]) * jw(w, self.md.cbs);
+        let mut ibd = (v[self.b] - v[self.d]) * jw(w, self.md.cbd);
+        let mut ibs = (v[self.b] - v[self.s]) * jw(w, self.md.cbs);
+        if let [jd, js] = &self.bulk[..] {
+            ibd += jd.ac_currents(x, v, w, st)[0] * C64::from(self.md.pol);
+            ibs += js.ac_currents(x, v, w, st)[0] * C64::from(self.md.pol);
+        }
         vec![ich - igd - ibd, igs + igd, -ich - igs - ibs]
     }
 }
