@@ -534,7 +534,7 @@ impl Editor {
                     if let Some(g) = hg {
                         self.checkpoint();
                         let name = self.sch.next_name(k);
-                        self.sch.comps.push(Component { kind: k, name, value: k.default_value().into(), pos: g, rot: self.place_rot, mirror: self.place_mirror });
+                        self.sch.comps.push(Component { kind: k, name, value: k.default_value().into(), pos: g, rot: self.place_rot, mirror: self.place_mirror, pins: vec![] });
                         self.changed();
                     }
                 }
@@ -782,7 +782,7 @@ impl Editor {
         }
         // ghost of the part being placed
         if let (Tool::Place(k), Some(g)) = (self.tool, hg) {
-            let ghost = Component { kind: k, name: String::new(), value: k.default_value().into(), pos: g, rot: self.place_rot, mirror: self.place_mirror };
+            let ghost = Component { kind: k, name: String::new(), value: k.default_value().into(), pos: g, rot: self.place_rot, mirror: self.place_mirror, pins: vec![] };
             self.draw_comp(&painter, rect, &ghost, p.sel.gamma_multiply(0.6), sw, &font, &p);
         }
         // wire preview
@@ -845,7 +845,7 @@ impl Editor {
     fn draw_comp(&self, painter: &egui::Painter, rect: Rect, c: &Component, col: Color32, sw: f32, font: &FontId, p: &Pal) {
         let st = Stroke::new(sw, col);
         let tf = |q: [f32; 2]| self.to_screen(rect, c.tf(q));
-        for prim in symbol(c.kind) {
+        for prim in c.prims() {
             match prim {
                 Prim::Line(v) => {
                     painter.add(Shape::line(v.into_iter().map(tf).collect(), st));

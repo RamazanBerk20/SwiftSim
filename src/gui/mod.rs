@@ -156,10 +156,10 @@ impl App {
                 return;
             }
         };
-        let (s, skipped) = asc::import(&asc::decode(&bytes));
+        let (s, skipped) = asc::import(&asc::decode(&bytes), p.parent());
         self.mode = Mode::Schematic;
         self.ed.load(s);
-        self.notes = skipped.iter().map(|n| format!("warning: LTspice symbol '{n}' has no SwiftSim equivalent and was left out (its nets are open)")).collect();
+        self.notes = skipped.iter().map(|n| format!("warning: LTspice symbol '{n}' has no SwiftSim equivalent and no subcircuit .asy for it was found (next to the schematic or in LTspice's lib/sym); it was left out (its nets are open)")).collect();
         self.log = self.notes.clone();
         self.status = if skipped.is_empty() {
             format!("Imported LTspice schematic {}", p.display())
@@ -1128,7 +1128,7 @@ fn draw_icon(p: &egui::Painter, r: egui::Rect, k: Kind, col: Color32) {
 }
 
 fn comp(kind: Kind, name: &str, value: &str, pos: [i32; 2], rot: u8) -> Component {
-    Component { kind, name: name.into(), value: value.into(), pos, rot, mirror: false }
+    Component { kind, name: name.into(), value: value.into(), pos, rot, mirror: false, pins: vec![] }
 }
 
 fn wires(pts: &[[i32; 2]]) -> Vec<Wire> {

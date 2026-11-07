@@ -1,8 +1,11 @@
 //! LTspice `.asc` import. LTspice uses 16 units per grid step and its own pin
 //! layout per `.asy` symbol, so each SwiftSim part is placed inside the LTspice
 //! footprint and joined to the LTspice pin positions with short stub wires.
+//! Other symbols are read from their `.asy` (next to the schematic, else in
+//! LTspice's `lib/sym`) and become subcircuit parts with the `.asy`'s pins.
 
 use super::schematic::{Component, Kind, P, Schematic, Text, Wire};
+use std::path::{Path, PathBuf};
 
 /// Stock LTspice symbol → (kind, `.asy` PIN positions / 16 in SPICE order,
 /// SwiftSim part origin in the same local units, flip the part vertically).
@@ -62,41 +65,135 @@ fn rest(line: &str, n: usize) -> &str {
     r
 }
 
+fn join<'a>(v: impl IntoIterator<Item = &'a String>) -> String {
+    v.into_iter().filter(|v| !v.is_empty()).cloned().collect::<Vec<_>>().join(" ")
+}
+
+#[derive(Default)]
+struct Attrs {
+    /// Value, Value2, SpiceLine, SpiceLine2 — joined in this order like LTspice's netlister.
+    vals: [String; 4],
+    model: String,
+    file: String,
+}
+
+impl Attrs {
+    fn set(&mut self, key: &str, v: String) {
+        match key {
+            "Value" => self.vals[0] = v,
+            "Value2" => self.vals[1] = v,
+            "SpiceLine" => self.vals[2] = v,
+            "SpiceLine2" => self.vals[3] = v,
+            "SpiceModel" => self.model = v,
+            "ModelFile" => self.file = v,
+            _ => {}
+        }
+    }
+
+    /// LTspice's netlisting of an `X` symbol: (library to `.lib`, words after the nodes).
+    fn subckt(&self) -> (&str, String) {
+        let [v, v2, ..] = &self.vals;
+        if self.file.is_empty() && !v.is_empty() && !v2.is_empty() {
+            // "auto-load" symbol: SpiceModel names the library, Value2 the subcircuit, Value is only shown
+            return (&self.model, v2.clone());
+        }
+        (&self.file, join([&self.model].into_iter().chain(&self.vals)))
+    }
+}
+
+/// A non-stock symbol: pin positions (LTspice units, SPICE order) and default attributes.
+/// Only subcircuit symbols (`Prefix X`) are taken.
+fn read_asy(text: &str) -> Option<(Vec<P>, Attrs)> {
+    let (mut pins, mut a, mut prefix) = (vec![], Attrs::default(), String::new());
+    for line in text.lines() {
+        let w: Vec<&str> = line.split_whitespace().collect();
+        let num = |i: usize| w.get(i).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+        match (w.first().copied(), w.get(1).copied()) {
+            // pins without a SpiceOrder keep their file order, after the numbered ones
+            (Some("PIN"), _) => pins.push((i32::MAX, [num(1), num(2)])),
+            (Some("PINATTR"), Some("SpiceOrder")) => {
+                if let Some(p) = pins.last_mut() {
+                    p.0 = num(2);
+                }
+            }
+            (Some("SYMATTR"), Some("Prefix")) => prefix = rest(line, 2).to_string(),
+            (Some("SYMATTR"), Some(k)) => a.set(k, rest(line, 2).to_string()),
+            _ => {}
+        }
+    }
+    pins.sort_by_key(|p| p.0);
+    prefix.eq_ignore_ascii_case("x").then(|| (pins.into_iter().map(|p| p.1).collect(), a))
+}
+
+/// `p`, or the existing path that differs from it only in letter case
+/// (LTspice files come from case-insensitive Windows file systems).
+fn existing(p: &Path) -> Option<PathBuf> {
+    if p.exists() {
+        return Some(p.to_path_buf());
+    }
+    let (dir, name) = (existing(p.parent()?)?, p.file_name()?);
+    std::fs::read_dir(&dir).ok()?.flatten().map(|e| e.path()).find(|e| e.file_name().is_some_and(|n| n.eq_ignore_ascii_case(name)))
+}
+
+/// The `.asy` of `name` as written in the `.asc` (`\` separates folders): next to
+/// the schematic by its file name, else under LTspice's `lib/sym`.
+fn find_asy(name: &str, dir: Option<&Path>) -> Option<String> {
+    let parts: Vec<&str> = name.split('\\').filter(|s| !s.is_empty()).collect();
+    let (file, folders) = parts.split_last()?;
+    let file = format!("{file}.asy");
+    let lib = swiftsim::netlist::ltspice_lib().map(|l| folders.iter().fold(l.join("sym"), |p, f| p.join(f)).join(&file));
+    dir.map(|d| d.join(&file)).into_iter().chain(lib).find_map(|p| std::fs::read(existing(&p)?).ok()).map(|b| decode(&b))
+}
+
 struct Part {
-    sym: (Kind, &'static [P], P, bool),
+    kind: Kind,
+    /// LTspice pin positions in SPICE order (LTspice units, unrotated).
+    lt: Vec<P>,
+    /// SwiftSim part origin in the symbol's grid units; flip the part vertically.
+    origin: P,
+    flip: bool,
     at: P,
     orient: String,
     inst: String,
-    /// Value, Value2, SpiceLine, SpiceLine2 — joined in this order like LTspice's netlister.
-    vals: [String; 4],
+    attrs: Attrs,
 }
 
 fn place(s: &mut Schematic, p: Part) {
-    let (kind, lt_pins, origin, flip) = p.sym;
+    let (kind, flip) = (p.kind, p.flip);
     let (m, n) = (p.orient.starts_with('M'), quarters(&p.orient));
     // orient() ∘ flip, rewritten as SwiftSim's mirror-then-counter-clockwise rotation
     let rot = ((if m { n } else { -n }) + if flip { 2 } else { 0 }).rem_euclid(4) as u8;
-    let o = orient(&p.orient, origin);
-    // the ideal opamp's Value names LTspice's own subcircuit; SwiftSim only takes the parameters
-    let vals = if kind == Kind::OpAmp { &p.vals[2..] } else { &p.vals[..] };
-    let value = vals.iter().filter(|v| !v.is_empty()).cloned().collect::<Vec<_>>().join(" ");
+    let o = orient(&p.orient, p.origin);
+    let (lib, value) = match kind {
+        Kind::Subckt => p.attrs.subckt(),
+        // the ideal opamp's Value names LTspice's own subcircuit; SwiftSim only takes the parameters
+        Kind::OpAmp => ("", join(&p.attrs.vals[2..])),
+        _ => ("", join(&p.attrs.vals)),
+    };
+    // a subcircuit part's pins are the .asy's own; stub wires still cover off-grid ones
+    let pins = if kind == Kind::Subckt { p.lt.iter().map(|q| [grid(q[0]), grid(q[1])]).collect() } else { vec![] };
     let name = if p.inst.is_empty() { s.next_name(kind) } else { p.inst };
-    let c = Component { kind, name, value, pos: [grid(p.at[0]) + o[0], grid(p.at[1]) + o[1]], rot, mirror: m != flip };
-    for (a, q) in c.pin_pos().into_iter().zip(lt_pins) {
-        let l = orient(&p.orient, [q[0] * 16, q[1] * 16]);
+    let c = Component { kind, name, value, pos: [grid(p.at[0]) + o[0], grid(p.at[1]) + o[1]], rot, mirror: m != flip, pins };
+    for (a, q) in c.pin_pos().into_iter().zip(&p.lt) {
+        let l = orient(&p.orient, *q);
         let b = [grid(p.at[0] + l[0]), grid(p.at[1] + l[1])];
         if a != b {
             s.wires.push(Wire { a, b });
         }
+    }
+    let text = if lib.contains(char::is_whitespace) { format!(".lib \"{lib}\"") } else { format!(".lib {lib}") };
+    if !lib.is_empty() && !s.texts.iter().any(|t| t.text == text) {
+        s.texts.push(Text { pos: [c.pos[0], c.world_bbox().1[1].ceil() as i32 + 2], text });
     }
     s.comps.push(c);
 }
 
 pub use swiftsim::netlist::decode;
 
-/// Converts an LTspice schematic. Also returns the names of symbols that have
-/// no SwiftSim equivalent (sorted, unique); those parts are left out.
-pub fn import(text: &str) -> (Schematic, Vec<String>) {
+/// Converts an LTspice schematic; `dir` is its folder (for `.asy` files next to it).
+/// Also returns the names of symbols that are neither stock nor a subcircuit
+/// `.asy` that could be found (sorted, unique); those parts are left out.
+pub fn import(text: &str, dir: Option<&Path>) -> (Schematic, Vec<String>) {
     let mut s = Schematic::default();
     let mut skipped: Vec<String> = vec![];
     let mut cur: Option<Part> = None;
@@ -110,17 +207,21 @@ pub fn import(text: &str) -> (Schematic, Vec<String>) {
                 let net = rest(line, 3);
                 let kind = if net == "0" { Kind::Ground } else { Kind::Label };
                 let value = if net == "0" { String::new() } else { net.to_string() };
-                s.comps.push(Component { kind, name: String::new(), value, pos: at, rot: 0, mirror: false });
+                s.comps.push(Component { kind, name: String::new(), value, pos: at, rot: 0, mirror: false, pins: vec![] });
             }
             Some("SYMBOL") => {
                 if let Some(p) = cur.take() {
                     place(&mut s, p);
                 }
                 let name = w.get(1).copied().unwrap_or("");
-                match symbol(&name.rsplit('\\').next().unwrap_or("").to_ascii_lowercase()) {
-                    Some(sym) => {
+                let sym = match symbol(&name.rsplit('\\').next().unwrap_or("").to_ascii_lowercase()) {
+                    Some((kind, pins, origin, flip)) => Some((kind, pins.iter().map(|q| [q[0] * 16, q[1] * 16]).collect(), origin, flip, Attrs::default())),
+                    None => find_asy(name, dir).and_then(|t| read_asy(&t)).map(|(lt, attrs)| (Kind::Subckt, lt, [0, 0], false, attrs)),
+                };
+                match sym {
+                    Some((kind, lt, origin, flip, attrs)) => {
                         let orient = w.get(4).copied().unwrap_or("R0").to_string();
-                        cur = Some(Part { sym, at: [num(2), num(3)], orient, inst: String::new(), vals: Default::default() });
+                        cur = Some(Part { kind, lt, origin, flip, at: [num(2), num(3)], orient, inst: String::new(), attrs });
                     }
                     None => skipped.push(name.to_string()),
                 }
@@ -130,11 +231,8 @@ pub fn import(text: &str) -> (Schematic, Vec<String>) {
                     let v = rest(line, 2).to_string();
                     match w.get(1).copied() {
                         Some("InstName") => p.inst = v,
-                        Some("Value") => p.vals[0] = v,
-                        Some("Value2") => p.vals[1] = v,
-                        Some("SpiceLine") => p.vals[2] = v,
-                        Some("SpiceLine2") => p.vals[3] = v,
-                        _ => {}
+                        Some(k) => p.attrs.set(k, v),
+                        None => {}
                     }
                 }
             }
@@ -165,13 +263,13 @@ mod tests {
     use super::*;
 
     fn lines(asc: &str) -> Vec<String> {
-        let (s, skipped) = import(asc);
+        let (s, skipped) = import(asc, None);
         assert!(skipped.is_empty(), "{skipped:?}");
         s.netlist().text.lines().map(String::from).collect()
     }
 
     fn op(asc: &str, nodes: &[&str]) -> Vec<f64> {
-        let n = import(asc).0.netlist();
+        let n = import(asc, None).0.netlist();
         let r = swiftsim::run_netlist(&n.text, None, &swiftsim::Control::default()).unwrap_or_else(|e| panic!("{e}\n{}", n.text));
         let p = &r.plots[0];
         nodes.iter().map(|v| p.re[p.index(&format!("v({v})")).unwrap_or_else(|| panic!("{v}\n{}", n.text))][0]).collect()
@@ -358,7 +456,7 @@ FLAG 1920 400 i1n
                     let q = orient(o, [p[0] * 16, p[1] * 16]);
                     asc += &format!("FLAG {} {} p{}\n", 32 + q[0], -48 + q[1], i + 1);
                 }
-                let net = import(&asc).0.netlist().text;
+                let net = import(&asc, None).0.netlist().text;
                 let got: Vec<&str> = net.lines().nth(1).unwrap().split_whitespace().skip(1).take(pins.len()).collect();
                 let want: Vec<String> = (1..=pins.len()).map(|i| format!("p{i}")).collect();
                 assert_eq!(got, want, "{name} {o}\n{net}");
@@ -391,7 +489,7 @@ TEXT 0 200 Left 2 !Vd d 0 5\\nVg g 0 2\\nVb b 0 -1\\nRs s 0 1k\\n.op
         for want in ["M1 d g 0 b NMOS_GENERIC W=10u L=10u", "J1 d 0 s NJF"] {
             assert!(l.iter().any(|x| x == want), "missing {want:?} in {l:#?}");
         }
-        let n = import(FOUR_PIN).0.netlist();
+        let n = import(FOUR_PIN, None).0.netlist();
         let r = swiftsim::run_netlist(&n.text, None, &swiftsim::Control::default()).unwrap();
         let p = &r.plots[0];
         let v = |s: &str| p.re[p.index(s).unwrap()][0];
@@ -404,10 +502,103 @@ TEXT 0 200 Left 2 !Vd d 0 5\\nVg g 0 2\\nVb b 0 -1\\nRs s 0 1k\\n.op
 
     #[test]
     fn unknown_symbols_are_reported_not_merged() {
-        let (s, skipped) = import("SYMBOL res 0 0 R0\nSYMATTR InstName R1\nSYMATTR Value 1k\nSYMBOL Opamps\\\\LT1001 100 0 R0\nSYMATTR InstName U1\nSYMATTR Value LT1001\nSYMBOL csw 300 0 R0\nSYMBOL csw 400 0 R0\n");
-        assert_eq!(skipped, ["Opamps\\\\LT1001", "csw"]);
+        let (s, skipped) = import("SYMBOL res 0 0 R0\nSYMATTR InstName R1\nSYMATTR Value 1k\nSYMBOL Opamps\\\\NoSuchAmp 100 0 R0\nSYMATTR InstName U1\nSYMATTR Value NoSuchAmp\nSYMBOL csw 300 0 R0\nSYMBOL csw 400 0 R0\n", None);
+        assert_eq!(skipped, ["Opamps\\\\NoSuchAmp", "csw"]);
         assert_eq!(s.comps.len(), 1);
         assert_eq!((s.comps[0].name.as_str(), s.comps[0].value.as_str()), ("R1", "1k"));
+    }
+
+    fn temp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("swiftsim-asy-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    // a made-up 6-pin symbol: SpiceOrder differs from file order, pin 6 is off the 16-unit grid
+    const MYAMP_ASY: &str = "Version 4
+SymbolType CELL
+LINE Normal -32 32 32 64
+PIN -32 80 NONE 8
+PINATTR PinName In-
+PINATTR SpiceOrder 2
+PIN -32 48 NONE 8
+PINATTR PinName In+
+PINATTR SpiceOrder 1
+PIN 0 32 NONE 8
+PINATTR SpiceOrder 3
+PIN 0 96 NONE 8
+PINATTR SpiceOrder 4
+PIN 32 64 NONE 8
+PINATTR SpiceOrder 5
+PIN 24 88 NONE 8
+PINATTR SpiceOrder 6
+SYMATTR Prefix X
+SYMATTR SpiceModel MYAMP
+SYMATTR ModelFile myamp.lib
+";
+    /// MYAMP_ASY's pins in SPICE order.
+    const LT_PINS: [P; 6] = [[-32, 48], [-32, 80], [0, 32], [0, 96], [32, 64], [24, 88]];
+
+    #[test]
+    fn custom_asy_next_to_schematic_every_orientation() {
+        let dir = temp("orient");
+        std::fs::write(dir.join("myamp.asy"), MYAMP_ASY).unwrap();
+        for o in ["R0", "R90", "R180", "R270", "M0", "M90", "M180", "M270"] {
+            let mut asc = format!("SYMBOL myamp 160 -48 {o}\nSYMATTR InstName U1\n");
+            for (i, q) in LT_PINS.iter().enumerate() {
+                let q = orient(o, *q);
+                asc += &format!("FLAG {} {} p{}\n", 160 + q[0], -48 + q[1], i + 1);
+            }
+            let (s, skipped) = import(&asc, Some(&dir));
+            let net = s.netlist().text;
+            assert!(skipped.is_empty() && net.lines().any(|l| l == "XU1 p1 p2 p3 p4 p5 p6 MYAMP"), "{o} {skipped:?}\n{net}");
+            assert_eq!(net.matches(".lib myamp.lib").count(), 1, "{net}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // a stand-in LTspice lib folder written by the test: the .asy in lib/sym (other letter case), the model in lib/sub
+    #[test]
+    fn custom_asy_from_ltspice_lib_simulates_and_round_trips() {
+        let lib = temp("lib");
+        std::fs::create_dir_all(lib.join("sym/Custom")).unwrap();
+        std::fs::create_dir_all(lib.join("sub")).unwrap();
+        std::fs::write(lib.join("sym/Custom/MyAmp.asy"), MYAMP_ASY).unwrap();
+        std::fs::write(lib.join("sub/myamp.lib"), ".subckt MYAMP inp inn vp vn out ref params: gain=1k\nE1 out ref inp inn {gain}\nRs vp vn 1meg\n.ends MYAMP\n").unwrap();
+        // non-inverting buffer: In+ = in, In- = out
+        let flag = |i: usize, net: &str| {
+            let q = orient("M90", LT_PINS[i]);
+            format!("FLAG {} {} {net}\n", 320 + q[0], 160 + q[1])
+        };
+        let asc = ["SYMBOL voltage 0 0 R0\nSYMATTR InstName V1\nSYMATTR Value 1\nFLAG 0 16 in\nFLAG 0 96 0\n", "SYMBOL voltage 96 0 R0\nSYMATTR InstName V2\nSYMATTR Value 5\nFLAG 96 16 vcc\nFLAG 96 96 0\n", "SYMBOL Custom\\\\myamp 320 160 M90\nSYMATTR InstName U1\nSYMATTR SpiceLine gain=1e5\n", &flag(0, "in"), &flag(1, "out"), &flag(2, "vcc"), &flag(3, "0"), &flag(4, "out"), &flag(5, "0"), "TEXT 0 300 Left 2 !.op\n"].concat();
+
+        swiftsim::netlist::set_ltspice_lib(Some(lib.clone()));
+        let (s, skipped) = import(&asc, None);
+        let n = s.netlist();
+        let r = swiftsim::run_netlist(&n.text, None, &swiftsim::Control::default());
+        swiftsim::netlist::set_ltspice_lib(None);
+        std::fs::remove_dir_all(&lib).ok();
+
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert!(n.text.lines().any(|l| l == "XU1 in out vcc 0 out 0 MYAMP gain=1e5"), "{}", n.text);
+        let r = r.unwrap_or_else(|e| panic!("{e}\n{}", n.text));
+        let p = &r.plots[0];
+        let out = p.re[p.index("v(out)").unwrap()][0];
+        assert!((out - 1e5 / (1e5 + 1.0)).abs() < 1e-9, "{out}");
+
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Schematic = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.netlist().text, n.text);
+        assert_eq!(back.comps.iter().find(|c| c.kind == Kind::Subckt).map(|c| c.pins.len()), Some(6));
+        // other parts save exactly as before
+        assert_eq!(json.matches("\"pins\"").count(), 1, "{json}");
+    }
+
+    #[test]
+    fn auto_load_asy_netlists_value2_and_only_x_is_taken() {
+        let (pins, a) = read_asy("SYMATTR Value LT9999\nSYMATTR Prefix X\nSYMATTR SpiceModel VENDOR.lib\nSYMATTR Value2 LT9999\nPIN 0 0 NONE 8\n").unwrap();
+        assert_eq!((pins, a.subckt()), (vec![[0, 0]], ("VENDOR.lib", "LT9999".to_string())));
+        assert!(read_asy("SYMATTR Prefix D\nPIN 0 0 NONE 8\n").is_none());
     }
 
     #[test]
