@@ -27,6 +27,8 @@ pub enum Kind {
     Vccs,
     Behavioral,
     Switch,
+    /// A non-stock LTspice symbol (`X` line); its pins live in `Component::pins`.
+    Subckt,
     Ground,
     Label,
 }
@@ -77,6 +79,7 @@ impl Kind {
             Kind::Vccs => "VCCS (G)",
             Kind::Behavioral => "Behavioral source (B)",
             Kind::Switch => "Voltage switch (S)",
+            Kind::Subckt => "Subcircuit (X)",
             Kind::Ground => "Ground",
             Kind::Label => "Net label",
         }
@@ -87,7 +90,7 @@ impl Kind {
             Kind::Resistor | Kind::Capacitor | Kind::Inductor => "Passive",
             Kind::Diode | Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 | Kind::Njf | Kind::Pjf => "Semiconductor",
             Kind::Voltage | Kind::Current | Kind::Vcvs | Kind::Vccs | Kind::Behavioral => "Sources",
-            Kind::OpAmp | Kind::Switch => "Blocks",
+            Kind::OpAmp | Kind::Switch | Kind::Subckt => "Blocks",
             Kind::Ground | Kind::Label => "Wiring",
         }
     }
@@ -126,6 +129,7 @@ impl Kind {
             Kind::Vccs => "G",
             Kind::Behavioral => "B",
             Kind::Switch => "S",
+            Kind::Subckt => "X",
             Kind::Ground | Kind::Label => "",
         }
     }
@@ -150,7 +154,7 @@ impl Kind {
             Kind::Vcvs | Kind::Vccs => "1",
             Kind::Behavioral => "V=V(in)*2",
             Kind::Switch => "SW",
-            Kind::Ground => "",
+            Kind::Subckt | Kind::Ground => "",
             Kind::Label => "out",
         }
     }
@@ -181,6 +185,9 @@ pub struct Component {
     pub pos: P,
     pub rot: u8,
     pub mirror: bool,
+    /// Subcircuit pins in local grid units and SPICE order; other kinds use `pins(kind)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pins: Vec<P>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -219,6 +226,7 @@ pub fn pins(k: Kind) -> &'static [P] {
         Kind::OpAmp => &[[-2, 1], [-2, -1], [2, 0]],
         Kind::Vcvs | Kind::Vccs | Kind::Switch => &[[0, -2], [0, 2], [-2, -1], [-2, 1]],
         Kind::Ground | Kind::Label => &[[0, 0]],
+        Kind::Subckt => &[],
     }
 }
 
@@ -363,7 +371,7 @@ pub fn symbol(k: Kind) -> Vec<Prim> {
             Line(vec![[-0.5, 0.9], [0.5, 0.9]]),
             Line(vec![[-0.2, 1.2], [0.2, 1.2]]),
         ],
-        Kind::Label => vec![],
+        Kind::Label | Kind::Subckt => vec![],
     }
 }
 
@@ -377,6 +385,7 @@ pub fn bbox(k: Kind) -> ([f32; 2], [f32; 2]) {
         Kind::Vcvs | Kind::Vccs | Kind::Switch => ([-2.0, -2.0], [1.0, 2.0]),
         Kind::Ground => ([-0.8, 0.0], [0.8, 1.3]),
         Kind::Label => ([-0.3, -0.6], [3.0, 0.3]),
+        Kind::Subckt => ([-1.0, -1.0], [1.0, 1.0]),
     }
 }
 
@@ -392,8 +401,36 @@ impl Component {
         }
         [x + self.pos[0] as f32, y + self.pos[1] as f32]
     }
+    pub fn local_pins(&self) -> &[P] {
+        if self.kind == Kind::Subckt { &self.pins } else { pins(self.kind) }
+    }
+    /// A subcircuit is drawn as the box through its pins (at least 2 units each way).
+    pub fn local_bbox(&self) -> ([f32; 2], [f32; 2]) {
+        if self.kind != Kind::Subckt || self.pins.is_empty() {
+            return bbox(self.kind);
+        }
+        let (mut a, mut b) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for p in &self.pins {
+            for i in 0..2 {
+                (a[i], b[i]) = (a[i].min(p[i] as f32), b[i].max(p[i] as f32));
+            }
+        }
+        for i in 0..2 {
+            if b[i] - a[i] < 2.0 {
+                (a[i], b[i]) = (a[i] - 1.0, b[i] + 1.0);
+            }
+        }
+        (a, b)
+    }
+    pub fn prims(&self) -> Vec<Prim> {
+        if self.kind != Kind::Subckt {
+            return symbol(self.kind);
+        }
+        let (a, b) = self.local_bbox();
+        vec![Prim::Line(vec![a, [b[0], a[1]], b, [a[0], b[1]], a])]
+    }
     pub fn pin_pos(&self) -> Vec<P> {
-        pins(self.kind)
+        self.local_pins()
             .iter()
             .map(|p| {
                 let q = self.tf([p[0] as f32, p[1] as f32]);
@@ -402,7 +439,7 @@ impl Component {
             .collect()
     }
     pub fn world_bbox(&self) -> ([f32; 2], [f32; 2]) {
-        let (a, b) = bbox(self.kind);
+        let (a, b) = self.local_bbox();
         let c = [self.tf(a), self.tf(b), self.tf([a[0], b[1]]), self.tf([b[0], a[1]])];
         let min = [c.iter().map(|p| p[0]).fold(f32::MAX, f32::min), c.iter().map(|p| p[1]).fold(f32::MAX, f32::min)];
         let max = [c.iter().map(|p| p[0]).fold(f32::MIN, f32::max), c.iter().map(|p| p[1]).fold(f32::MIN, f32::max)];
@@ -412,7 +449,7 @@ impl Component {
     pub fn current_signal(&self) -> Option<String> {
         let n = self.spice_name();
         Some(match self.kind {
-            Kind::Ground | Kind::Label | Kind::OpAmp => return None,
+            Kind::Ground | Kind::Label | Kind::OpAmp | Kind::Subckt => return None,
             Kind::Npn | Kind::Pnp => format!("Ic({n})"),
             Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 | Kind::Njf | Kind::Pjf => format!("Id({n})"),
             _ => format!("I({n})"),
@@ -588,6 +625,7 @@ impl Schematic {
                     format!("{name} {} {} {} swiftsim_opamp {v}", n[0], n[1], n[2])
                 }
                 Kind::Vcvs | Kind::Vccs | Kind::Switch => format!("{name} {} {} {} {} {v}", n[0], n[1], n[2], n[3]),
+                Kind::Subckt => format!("{name} {} {v}", n.join(" ")),
             };
             t.push_str(&line);
             t.push('\n');
@@ -630,7 +668,7 @@ mod tests {
     use super::*;
 
     fn comp(kind: Kind, name: &str, value: &str, pos: P) -> Component {
-        Component { kind, name: name.into(), value: value.into(), pos, rot: 0, mirror: false }
+        Component { kind, name: name.into(), value: value.into(), pos, rot: 0, mirror: false, pins: vec![] }
     }
 
     #[test]
