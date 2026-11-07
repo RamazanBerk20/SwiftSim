@@ -389,3 +389,124 @@ fn vendor_lm358_single_supply_and_inverting() {
     let v = sig(&amp(-1.0).plots[0], "v(out)")[0];
     assert!(v > 3.0 && v < 4.5, "clip {v}");
 }
+
+// ---------------------------------------------------------------- temperature
+
+/// SPICE3 diode: Vd = vt·ln(I/Is(T) + 1), Is(T) = Is·exp((T/Tnom−1)·Eg/(n·vt))·(T/Tnom)^(Xti/n).
+fn diode_vd(t_c: f64, tnom_c: f64) -> f64 {
+    let koq = 1.3806226e-23 / 1.6021918e-19;
+    let (t, tn) = (t_c + 273.15, tnom_c + 273.15);
+    let vt = koq * t;
+    let is = 1e-14 * ((t / tn - 1.0) * 1.11 / vt).exp() * (t / tn).powi(3);
+    vt * (1e-3 / is + 1.0).ln()
+}
+
+#[test]
+fn diode_forward_voltage_vs_temperature() {
+    let r = sim("d\nI1 0 a 1m\nD1 a 0 DX\n.model DX D(Is=1e-14)\n.temp 27 127\n.op\n");
+    assert_eq!(r.plots.len(), 2);
+    assert_eq!(r.plots[1].step, "temp=127");
+    let (v27, v127) = (sig(&r.plots[0], "v(a)")[0], sig(&r.plots[1], "v(a)")[0]);
+    close(v27, 0.6550994, 1e-5);
+    close(v27, diode_vd(27.0, 27.0), 1e-5);
+    close(v127, diode_vd(127.0, 27.0), 1e-5);
+    let slope = (v127 - v27) / 100.0;
+    assert!((-2.2e-3..-1.6e-3).contains(&slope), "dVf/dT = {slope}");
+    // .step temp does the same; .options tnom moves the reference point
+    let r = sim("d\nI1 0 a 1m\nD1 a 0 DX\n.model DX D(Is=1e-14)\n.step temp list 127\n.op\n");
+    close(sig(&r.plots[0], "v(a)")[0], v127, 1e-9);
+    assert!(!r.log.iter().any(|l| l.contains("warning")), "{:?}", r.log);
+    let r = sim("d\nI1 0 a 1m\nD1 a 0 DX\n.model DX D(Is=1e-14)\n.options tnom=50\n.temp 50\n.op\n");
+    close(sig(&r.plots[0], "v(a)")[0], diode_vd(50.0, 50.0), 1e-5);
+    // zero-bias junction cap (Cjo=1p, Vj=1, M=.5) → 1.0688542p at 127 °C (SPICE3 pbfact/gmanew rules)
+    let r = sim("c
+V1 a 0 0 AC 1
+D1 a 0 DC1
+.model DC1 D(Is=1e-14 Cjo=1p)
+.temp 127
+.ac lin 1 1meg 1meg
+");
+    let p = &r.plots[0];
+    close(-p.im[p.index("i(v1)").unwrap()][0], 2.0 * std::f64::consts::PI * 1e6 * 1.0688542e-12, 1e-6);
+}
+
+#[test]
+fn bjt_beta_and_mos_vto_kp_vs_temperature() {
+    // XTB=1.5: beta(127 °C) = 100·(400.15/300.15)^1.5 = 153.93 (no Early/high-injection effects)
+    let r = sim("q\nI1 0 b 10u\nV1 c 0 5\nQ1 c b 0 QX\n.model QX NPN(Is=1e-15 Bf=100 XTB=1.5)\n.temp 127\n.op\n");
+    let p = &r.plots[0];
+    close(sig(p, "ic(q1)")[0] / sig(p, "ib(q1)")[0], 153.9312, 1e-4);
+    // level 1, gamma=0, phi=0.6: VTO 1 → 0.89932 V and beta 1m → 1m·(400.15/300.15)^-1.5 at 127 °C
+    let net = "m\nVg g 0 3\nVd d 0 5\nM1 d g 0 0 NX L=100u W=100u\n.model NX NMOS(Vto=1 Kp=1m Phi=0.6)\n.step temp list 27 127\n.op\n";
+    let r = sim(net);
+    close(sig(&r.plots[0], "id(m1)")[0], 0.5e-3 * 2.0 * 2.0, 1e-6);
+    close(sig(&r.plots[1], "id(m1)")[0], 0.5e-3 * (400.15f64 / 300.15).powf(-1.5) * (3.0 - 0.8993219f64).powi(2), 1e-5);
+}
+
+#[test]
+fn resistor_temperature_coefficients() {
+    // 1k·(1 + 4m·100 + 10u·100²) = 1.5k at 127 °C
+    let r = sim("r\nI1 0 a 1m\nR1 a 0 1k tc1=4m tc2=10u\nI2 0 b 1m\nR2 b 0 1k tc=4m,10u\n.temp 127\n.op\n");
+    close(sig(&r.plots[0], "v(a)")[0], 1.5, 1e-6);
+    close(sig(&r.plots[0], "v(b)")[0], 1.5, 1e-6);
+}
+
+// ---------------------------------------------------------------- .tf / .four
+
+#[test]
+fn transfer_function_of_divider() {
+    // 1k into 1k||2k: gain 0.4, Rin 1k + 666.7, Rout 1k||666.7 = 400
+    let r = sim("tf\nV1 in 0 5\nR1 in out 1k\nR2 out 0 1k\nR3 out 0 2k\n.tf V(out) V1\n");
+    let p = &r.plots[0];
+    close(sig(p, "transfer_function")[0], 0.4, 1e-6);
+    close(sig(p, "v1#input_impedance")[0], 1000.0 + 2000.0 / 3.0, 1e-6);
+    close(sig(p, "output_impedance_at_v(out)")[0], 400.0, 1e-6);
+    assert!(r.log.iter().any(|l| l.contains("transfer_function = 400m")), "{:?}", r.log);
+    // current in, current out: I1 splits equally into R1 and R2→Vm; Rin = R1||R2, Rout = R1+R2
+    let r = sim("tf\nI1 0 a 1m\nR1 a 0 1k\nR2 a b 1k\nVm b 0 0\n.tf I(Vm) I1\n");
+    let p = &r.plots[0];
+    close(sig(p, "transfer_function")[0], 0.5, 1e-6);
+    close(sig(p, "i1#input_impedance")[0], 500.0, 1e-6);
+    close(sig(p, "output_impedance_at_i(vm)")[0], 2000.0, 1e-6);
+}
+
+#[test]
+fn fourier_of_clipped_sine() {
+    let r = sim("four\nV1 in 0 SIN(0 1 1k)\nB1 out 0 V=limit(V(in),-0.5,0.5)\nR1 out 0 1k\n.tran 0 5m 0 1u\n.four 1k V(out)\n");
+    // sin clipped at ±0.5 (α = 30°): b1 = (2α + sin2α)/π,
+    // odd n: bn = 4/π·[½(sin((n−1)α)/(n−1) − sin((n+1)α)/(n+1)) + sinα·cos(nα)/n], even n: 0
+    let a = std::f64::consts::FRAC_PI_6;
+    let pi = std::f64::consts::PI;
+    let b = |n: f64| {
+        if n == 1.0 {
+            (2.0 * a + (2.0 * a).sin()) / pi
+        } else if n % 2.0 == 0.0 {
+            0.0
+        } else {
+            4.0 / pi * (0.5 * (((n - 1.0) * a).sin() / (n - 1.0) - ((n + 1.0) * a).sin() / (n + 1.0)) + a.sin() * (n * a).cos() / n)
+        }
+    };
+    let row = |h: usize| -> f64 {
+        let l = r.log.iter().find(|l| l.split_whitespace().next() == Some(&h.to_string())).unwrap_or_else(|| panic!("{:?}", r.log));
+        l.split_whitespace().nth(2).unwrap().parse().unwrap()
+    };
+    for h in 1..=9 {
+        let want = b(h as f64).abs();
+        assert!((row(h) - want).abs() < 1e-4 * b(1.0), "harmonic {h}: {} vs {want}", row(h));
+    }
+    let thd = ((3..=9).step_by(2).map(|n| b(n as f64).powi(2)).sum::<f64>()).sqrt() / b(1.0) * 100.0;
+    let l = r.log.iter().find(|l| l.starts_with("Total Harmonic Distortion")).unwrap();
+    let got: f64 = l.rsplit(' ').next().unwrap().trim_end_matches('%').parse().unwrap();
+    close(got, thd, 1e-3);
+    let dc: f64 = r.log.iter().find_map(|l| l.strip_prefix("DC component: ")).unwrap().parse().unwrap();
+    assert!(dc.abs() < 1e-6);
+}
+
+#[test]
+fn jfet_gate_junction_follows_temperature() {
+    // forward-biased gate (drain = source) behaves like a diode: Vgs drops ~2 mV/°C
+    let r = sim("jt\n.model jn NJF(vto=-2 beta=1m is=1f)\nIg 0 g 1m\nJ1 0 g 0 jn\n.step temp list 27 127\n.op\n");
+    let (v27, v127) = (sig(&r.plots[0], "v(g)")[0], sig(&r.plots[1], "v(g)")[0]);
+    let slope = (v127 - v27) / 100.0;
+    assert!((-2.6e-3..-1.4e-3).contains(&slope), "dVgs/dT = {slope}");
+}

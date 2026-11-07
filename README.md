@@ -28,8 +28,14 @@ On Windows the same commands produce `swiftsim.exe` (no console window in releas
 
 **Simulator engine** (`src/`, usable as a library)
 - Analyses: `.op`, `.tran` (adaptive trapezoidal with LTE control, breakpoints, `uic`),
-  `.ac` (dec/oct/lin), `.dc` (one or two nested sweeps)
-- `.step` (param / source / element; lin, dec, oct, list; nested), `.meas`
+  `.ac` (dec/oct/lin), `.dc` (one or two nested sweeps), `.tf V(out[,ref]) | I(Vx) <src>`
+  (DC small-signal gain, input and output impedance)
+- `.four f0 [Nharmonics] [Nperiods] V(out) …` after `.tran`: harmonics, phases and THD in the Log
+- Temperature: `.temp t1 [t2 …]` (several values step them), `.step temp …`, `.options tnom=`;
+  `temp` is usable in expressions. SPICE3 scaling of diode/BJT saturation currents (`XTI`, `EG`),
+  junction potentials and capacitances, BJT beta (`XTB`), level-1 MOSFET VTO/KP, thermal voltage,
+  resistor `tc1=`/`tc2=` (or `tc=a,b`)
+- `.step` (param / source / element / temp; lin, dec, oct, list; nested), `.meas`
   (AVG, MAX, MIN, PP, RMS, INTEG, FIND…AT, FIND…WHEN, WHEN, TRIG/TARG, PARAM),
   `.param` with expressions, `.func` user functions (global or per `.subckt`), `.ic`,
   `.options`, `.model`, `.subckt` with `params:`,
@@ -85,7 +91,9 @@ Pan with middle or right drag, zoom with the wheel.
 
 Being explicit, since the goal is LTSpice parity:
 
-- Analyses: `.noise`, `.tf`, `.four`, `.temp` / temperature dependence (everything is 27 °C)
+- Analyses: `.noise`
+- Temperature: no effect on C/L values, diode BV/RS, BJT RB/RC/RE, VDMOS VTO (VDMOS only scales KP)
+  or JFET VTO/BETA (JFET gate junctions do scale); no per-model `TNOM`
 - Devices: MESFET, transmission lines (T/O), current-controlled switch (W),
   MOSFET levels above 1 / BSIM (they run with level-1 equations and a warning in the Log),
   LTSpice digital/XSPICE `A` devices, E/G `laplace=`

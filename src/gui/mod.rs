@@ -436,7 +436,7 @@ impl App {
                     });
                 }
                 ui.separator();
-                ui.label("Supported: .op .tran .ac .dc .step .meas .param .ic .model .subckt .include/.lib .options");
+                ui.label("Supported: .op .tran .ac .dc .tf .four .temp .step .meas .param .ic .model .subckt .include/.lib .options");
                 ui.label("Elements: R C L K V I D Q M(level1/VDMOS) E F G H B S X");
             });
         });
@@ -699,11 +699,18 @@ impl App {
                     field(ui, "Stop", &mut f.b);
                     field(ui, "Step", &mut f.c);
                 }
+                4 => {
+                    field(ui, "Output", &mut f.a);
+                    field(ui, "Input source", &mut f.d);
+                }
                 _ => {}
             }
         });
         if f.kind == 3 {
             ui.weak("DC operating point: voltages appear on the schematic.");
+        }
+        if f.kind == 4 {
+            ui.weak("Small-signal gain, input and output impedance; results in the Log.");
         }
         if f.kind != before.kind {
             let src = self.ed.sch.comps.iter().find(|c| c.kind == Kind::Voltage).map_or("V1".to_string(), |c| c.spice_name());
@@ -872,7 +879,7 @@ impl eframe::App for App {
 
 fn is_analysis(l: &str) -> bool {
     let w = l.trim().to_ascii_lowercase();
-    [".tran", ".ac", ".dc", ".op"].iter().any(|k| w == *k || w.starts_with(&format!("{k} ")))
+    [".tran", ".ac", ".dc", ".op", ".tf"].iter().any(|k| w == *k || w.starts_with(&format!("{k} ")))
 }
 
 #[derive(Clone, PartialEq)]
@@ -886,7 +893,7 @@ struct SimForm {
 }
 
 impl SimForm {
-    const KINDS: [&str; 4] = ["Transient", "AC analysis", "DC sweep", "Operating point"];
+    const KINDS: [&str; 5] = ["Transient", "AC analysis", "DC sweep", "Operating point", "DC transfer function"];
 
     fn parse(line: &str) -> SimForm {
         let t: Vec<String> = line.split_whitespace().map(|s| s.to_string()).collect();
@@ -895,6 +902,7 @@ impl SimForm {
             Some(".ac") => SimForm { kind: 1, d: g(1), a: g(2), b: g(3), c: g(4), uic: false },
             Some(".dc") => SimForm { kind: 2, d: g(1), a: g(2), b: g(3), c: g(4), uic: false },
             Some(".op") => SimForm { kind: 3, a: String::new(), b: String::new(), c: String::new(), d: String::new(), uic: false },
+            Some(".tf") => SimForm { kind: 4, a: g(1), d: g(2), b: String::new(), c: String::new(), uic: false },
             Some(".tran") => {
                 let uic = t.iter().any(|s| s.eq_ignore_ascii_case("uic"));
                 let n: Vec<String> = t[1..].iter().filter(|s| !s.eq_ignore_ascii_case("uic")).cloned().collect();
@@ -915,6 +923,7 @@ impl SimForm {
             0 => (s("10m"), s(""), s(""), s("")),
             1 => (s("100"), s("1"), s("1meg"), s("dec")),
             2 => (s("0"), s("5"), s("0.1"), s(src)),
+            4 => (s("V(out)"), s(""), s(""), s(src)),
             _ => (s(""), s(""), s(""), s("")),
         };
         SimForm { kind, a, b, c, d, uic: false }
@@ -938,6 +947,7 @@ impl SimForm {
             }
             1 => format!(".ac {} {} {} {}", or(&self.d, "dec"), or(&self.a, "100"), or(&self.b, "1"), or(&self.c, "1meg")),
             2 => format!(".dc {} {} {} {}", or(&self.d, "V1"), or(&self.a, "0"), or(&self.b, "5"), or(&self.c, "0.1")),
+            4 => format!(".tf {} {}", or(&self.a, "V(out)"), or(&self.d, "V1")),
             _ => ".op".into(),
         }
     }
@@ -1197,5 +1207,6 @@ mod tests {
         assert_eq!(super::SimForm::parse(".ac dec 20 10 1meg").line(), ".ac dec 20 10 1meg");
         assert_eq!(super::SimForm::defaults(1, "V1").line(), ".ac dec 100 1 1meg");
         assert_eq!(super::SimForm::defaults(2, "Vin").line(), ".dc Vin 0 5 0.1");
+        assert_eq!(super::SimForm::parse(".tf V(out) Vin").line(), ".tf V(out) Vin");
     }
 }

@@ -57,6 +57,8 @@ pub enum Analysis {
     Dc(Vec<(String, Vec<f64>)>),
     Ac(Vec<f64>),
     Tran { tstep: f64, tstop: f64, tstart: f64, tmax: f64, uic: bool },
+    /// `.tf V(a[,b]) src` or `.tf I(vx) src`: output (current?, node/source, ref node).
+    Tf { cur: bool, a: String, b: String, src: String },
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +80,8 @@ pub struct Deck {
     pub meas: Vec<Line>,
     pub ics: Vec<Line>,
     pub options: Vec<Line>,
+    pub temps: Vec<Line>,
+    pub four: Vec<Line>,
     pub warnings: Vec<String>,
 }
 
@@ -370,7 +374,7 @@ impl Deck {
             }
             match first.as_str() {
                 ".param" | ".params" => self.params.extend(parse_assignments(after_words(&l.text, 1))),
-                ".op" | ".tran" | ".ac" | ".dc" => {
+                ".op" | ".tran" | ".ac" | ".dc" | ".tf" => {
                     if self.analysis.is_none() {
                         self.analysis = Some(l);
                     } else {
@@ -380,6 +384,8 @@ impl Deck {
                 ".step" => self.steps.push(l),
                 ".meas" | ".measure" => self.meas.push(l),
                 ".ic" => self.ics.push(l),
+                ".temp" => self.temps.push(l),
+                ".four" | ".fourier" => self.four.push(l),
                 ".options" | ".option" | ".opt" | ".opts" => self.options.push(l),
                 ".backanno" | ".save" | ".probe" | ".plot" | ".print" | ".width" | ".title" | ".end" | ".endl" => {}
                 f if f.starts_with('.') => self.warnings.push(format!("line {}: '{f}' is not supported yet and was ignored", l.no)),
@@ -392,8 +398,23 @@ impl Deck {
         Ok(())
     }
 
+    /// Temperatures (°C) listed on `.temp` lines.
+    fn temps(&self) -> Result<Vec<f64>, String> {
+        let mut v = vec![];
+        for l in &self.temps {
+            for t in l.text.split_whitespace().skip(1) {
+                v.push(eval_str(t, &Scope::default()).map_err(|e| format!("line {}: .temp: {e}", l.no))?);
+            }
+        }
+        Ok(v)
+    }
+
     pub fn eval_params(&self, over: &HashMap<String, f64>) -> Result<Scope, String> {
         let mut sc = Scope { vars: over.clone(), funcs: Rc::new(self.funcs.clone()) };
+        // circuit temperature (°C): stepped value, single `.temp`, or 27
+        if !sc.contains_key("temp") {
+            sc.insert("temp".into(), self.temps()?.first().copied().unwrap_or(27.0));
+        }
         let mut pending: Vec<&(String, String)> = self.params.iter().filter(|(k, _)| !over.contains_key(k)).collect();
         while !pending.is_empty() {
             let before = pending.len();
@@ -429,6 +450,7 @@ impl Deck {
                     "itl4" => o.itl4 = x as usize,
                     "trtol" => o.trtol = x,
                     "maxstep" => o.maxstep = x,
+                    "tnom" => o.tnom = x,
                     _ => {}
                 }
             }
@@ -437,7 +459,7 @@ impl Deck {
     }
 
     pub fn analysis(&self, sc: &Scope) -> Result<Analysis, String> {
-        let l = self.analysis.as_ref().ok_or("no analysis command: add .op, .tran, .ac or .dc")?;
+        let l = self.analysis.as_ref().ok_or("no analysis command: add .op, .tran, .ac, .dc or .tf")?;
         let toks = tokenize(&l.text);
         let e = |s: &str| eval_str(s, sc).map_err(|er| format!("line {}: {er}", l.no));
         let tk = |i: usize| toks.get(i).map(|s| s.as_str()).ok_or(format!("line {}: incomplete '{}'", l.no, l.text));
@@ -486,6 +508,16 @@ impl Deck {
                 }
                 Analysis::Dc(sw)
             }
+            ".tf" => {
+                let t: Vec<&str> = toks[1..].iter().map(|s| s.as_str()).collect();
+                let (cur, a, b, src) = match t[..] {
+                    ["v", "(", a, ")", src] => (false, a, "", src),
+                    ["v", "(", a, b, ")", src] => (false, a, b, src),
+                    ["i", "(", a, ")", src] => (true, a, "", src),
+                    _ => return Err(format!("line {}: expected .tf V(out[,ref]) <source> or .tf I(<vsource>) <source>", l.no)),
+                };
+                Analysis::Tf { cur, a: a.into(), b: b.into(), src: src.into() }
+            }
             _ => unreachable!(),
         })
     }
@@ -506,10 +538,6 @@ impl Deck {
             }
             let name = toks.get(i).ok_or(format!("line {}: incomplete .step", l.no))?.clone();
             i += 1;
-            if name == "temp" {
-                warn.push(format!("line {}: .step temp is not supported yet", l.no));
-                continue;
-            }
             let values = if toks.get(i).is_some_and(|t| t == "list") {
                 toks[i + 1..].iter().map(|t| e(t)).collect::<Result<Vec<_>, _>>()?
             } else {
@@ -519,6 +547,14 @@ impl Deck {
                 sweep(mode, e(&toks[i])?, e(&toks[i + 1])?, e(&toks[i + 2])?).map_err(|er| format!("line {}: {er}", l.no))?
             };
             out.push(Step { name, values });
+        }
+        let temps = self.temps()?;
+        if temps.len() > 1 {
+            if out.iter().any(|s| s.name == "temp") {
+                warn.push(".temp ignored: .step temp sets the temperature".into());
+            } else {
+                out.push(Step { name: "temp".into(), values: temps });
+            }
         }
         Ok((out, warn))
     }
@@ -713,7 +749,10 @@ impl Deck {
         if flat.is_empty() {
             return Err("netlist has no circuit elements".into());
         }
-        let mut b = Builder { deck: self, over, nodes: HashMap::new(), node_names: vec![], internal: vec![], devs: vec![], inds: vec![], ks: vec![], warnings: vec![] };
+        let opts = self.options();
+        let temp = global["temp"] + 273.15;
+        let tnom = opts.tnom + 273.15;
+        let mut b = Builder { deck: self, over, temp, tnom, nodes: HashMap::new(), node_names: vec![], internal: vec![], devs: vec![], inds: vec![], ks: vec![], warnings: vec![] };
         for f in &flat {
             b.element(f).map_err(|e| format!("line {} ({}): {e}", f.line, f.name))?;
         }
@@ -779,7 +818,7 @@ impl Deck {
             devices: devs,
             out_nodes,
             ics,
-            opts: self.options(),
+            opts,
             warnings: b.warnings,
         })
     }
@@ -869,6 +908,9 @@ struct Flat {
 struct Builder<'a> {
     deck: &'a Deck,
     over: &'a HashMap<String, f64>,
+    /// Circuit and nominal temperature, kelvin.
+    temp: f64,
+    tnom: f64,
     nodes: HashMap<String, usize>,
     node_names: Vec<String>,
     internal: Vec<bool>,
@@ -998,7 +1040,11 @@ impl Builder<'_> {
         let name = f.name.clone();
         match f.kind {
             'r' => {
-                let r = value("r")?;
+                // LTspice also writes `tc=tc1,tc2`
+                let tc1 = kv.get("tc1").or(kv.get("tc")).map_or(Ok(0.0), |v| num(v))?;
+                let tc2 = kv.get("tc2").or(pos.get(1).filter(|_| kv.contains_key("tc"))).map_or(Ok(0.0), |v| num(v))?;
+                let dt = self.temp - self.tnom;
+                let r = value("r")? * (1.0 + tc1 * dt + tc2 * dt * dt);
                 let r = if r.abs() < 1e-9 { 1e-9 } else { r };
                 self.res(name, nd[0], nd[1], r);
             }
@@ -1039,7 +1085,7 @@ impl Builder<'_> {
                 let g = |k: &[&str], d: f64| mparam(&m, k, d, &sc);
                 let n = g(&["n"], 1.0)?;
                 let bv = g(&["bv"], 0.0)?;
-                let md = DiodeModel {
+                let mut md = DiodeModel {
                     is: g(&["is"], 1e-14)? * area,
                     n,
                     cjo: g(&["cjo", "cj0", "cj"], 0.0)? * area,
@@ -1050,7 +1096,9 @@ impl Builder<'_> {
                     ibv: g(&["ibv"], 1e-3)? * area,
                     nbv: g(&["nbv"], n)?,
                     fc: g(&["fc"], 0.5)?,
+                    vt: VT,
                 };
+                md.set_temp(self.temp, self.tnom, g(&["eg"], 1.11)?, g(&["xti"], 3.0)?);
                 let a = self.series(&name, "a", nd[0], g(&["rs"], 0.0)? / area);
                 self.devs.push(Box::new(Diode { name, a, k: nd[1], md, s: 0, vd_old: 0.0 }));
             }
@@ -1059,7 +1107,7 @@ impl Builder<'_> {
                 let area = pos.get(1).map_or(kvn("area", 1.0), |v| num(v))?;
                 let g = |k: &[&str], d: f64| mparam(&m, k, d, &sc);
                 let inf0 = |v: f64| if v > 0.0 { v } else { f64::INFINITY };
-                let md = BjtModel {
+                let mut md = BjtModel {
                     pol: if m.kind == "pnp" { -1.0 } else { 1.0 },
                     is: g(&["is"], 1e-16)? * area,
                     bf: g(&["bf"], 100.0)?,
@@ -1083,7 +1131,9 @@ impl Builder<'_> {
                     tf: g(&["tf"], 0.0)?,
                     tr: g(&["tr"], 0.0)?,
                     fc: g(&["fc"], 0.5)?,
+                    vt: VT,
                 };
+                md.set_temp(self.temp, self.tnom, g(&["eg"], 1.11)?, g(&["xti", "pt"], 3.0)?, g(&["xtb"], 0.0)?);
                 let c = self.series(&name, "c", nd[0], g(&["rc"], 0.0)? / area);
                 let b = self.series(&name, "b", nd[1], g(&["rb"], 0.0)? / area);
                 let e = self.series(&name, "e", nd[2], g(&["re"], 0.0)? / area);
@@ -1115,11 +1165,12 @@ impl Builder<'_> {
                         cbd: 0.0,
                         cbs: 0.0,
                     };
-                    let beta = g(&["kp"], 1.0)? * mult;
+                    // shortcut: VDMOS only scales KP with temperature (VTO fixed, no Vtotc/Bex)
+                    let beta = g(&["kp"], 1.0)? * mult * (self.temp / self.tnom).powf(-1.5);
                     self.devs.push(Box::new(Mos { name: name.clone(), d: di, g: gi, s: si, b: si, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0 }));
                     let bv = g(&["bv"], 0.0)?;
                     let n = g(&["n"], 1.0)?;
-                    let dm = DiodeModel {
+                    let mut dm = DiodeModel {
                         is: g(&["is"], 1e-14)? * mult,
                         n,
                         cjo: g(&["cjo"], 0.0)? * mult,
@@ -1130,7 +1181,9 @@ impl Builder<'_> {
                         ibv: g(&["ibv"], 1e-3)?,
                         nbv: g(&["nbv"], n)?,
                         fc: 0.5,
+                        vt: VT,
                     };
+                    dm.set_temp(self.temp, self.tnom, g(&["eg"], 1.11)?, g(&["xti"], 3.0)?);
                     let (an, ca) = if pol > 0.0 { (s, d) } else { (d, s) };
                     let an = self.series(&name, "body", an, g(&["rb"], 0.0)? / mult);
                     self.devs.push(Box::new(Diode { name: format!("{name}#body"), a: an, k: ca, md: dm, s: 0, vd_old: 0.0 }));
@@ -1148,7 +1201,7 @@ impl Builder<'_> {
                     let mult = kvn("m", 1.0)?;
                     let tox = g(&["tox"], 0.0)?;
                     let kp_def = if tox > 0.0 { g(&["u0", "uo"], 600.0)? * 1e-4 * 3.453e-11 / tox } else { 2e-5 };
-                    let md = MosModel {
+                    let mut md = MosModel {
                         pol: if m.kind == "pmos" { -1.0 } else { 1.0 },
                         vto: g(&["vto", "vt0"], 0.0)?,
                         kp: g(&["kp"], kp_def)?,
@@ -1160,7 +1213,8 @@ impl Builder<'_> {
                         cbd: g(&["cbd"], 0.0)?,
                         cbs: g(&["cbs"], 0.0)?,
                     };
-                    let beta = md.kp * w / l * mult;
+                    md.set_temp(self.temp, self.tnom);
+                    let beta = md.kp * w / l * mult * (self.temp / self.tnom).powf(-1.5);
                     let di = self.series(&name, "d", d, g(&["rd"], 0.0)?);
                     let si = self.series(&name, "s", s, g(&["rs"], 0.0)?);
                     self.devs.push(Box::new(Mos { name, d: di, g: gt, s: si, b, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0 }));
@@ -1178,8 +1232,11 @@ impl Builder<'_> {
                 let md = MosModel { pol, vto: pol * g(&["vto", "vt0"], -2.0)?, kp: 0.0, gamma: 0.0, phi: 0.6, lambda: g(&["lambda"], 0.0)?, cgs: 0.0, cgd: 0.0, cbd: 0.0, cbs: 0.0 };
                 let beta = 2.0 * g(&["beta"], 1e-4)? * area;
                 let ch = Mos { name: name.clone(), d: di, g: gt, s: si, b: si, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0 };
+                let (temp, tnom) = (self.temp, self.tnom);
+                // gate junctions scale with temperature like diodes; channel VTO/BETA stay fixed (SPICE3)
                 let junction = |tag: &str, ch: usize, c: f64| -> Result<Diode, String> {
-                    let md = DiodeModel { is: g(&["is"], 1e-14)? * area, n: g(&["n"], 1.0)?, cjo: c * area, vj: g(&["pb"], 1.0)?, m: g(&["m"], 0.5)?, tt: 0.0, bv: f64::INFINITY, ibv: 1e-3, nbv: 1.0, fc: g(&["fc"], 0.5)? };
+                    let mut md = DiodeModel { is: g(&["is"], 1e-14)? * area, n: g(&["n"], 1.0)?, cjo: c * area, vj: g(&["pb"], 1.0)?, m: g(&["m"], 0.5)?, tt: 0.0, bv: f64::INFINITY, ibv: 1e-3, nbv: 1.0, fc: g(&["fc"], 0.5)?, vt: VT };
+                    md.set_temp(temp, tnom, g(&["eg"], 1.11)?, g(&["xti"], 3.0)?);
                     let (a, k) = if pol > 0.0 { (gt, ch) } else { (ch, gt) };
                     Ok(Diode { name: format!("{name}#{tag}"), a, k, md, s: 0, vd_old: 0.0 })
                 };

@@ -276,3 +276,71 @@ pub fn measure(line: &str, p: &Plot, prior: &[(String, String, f64)], global: &H
     };
     Ok(Some((name, v)))
 }
+
+/// `.four f0 [Nharmonics [Nperiods]] trace…` on a transient plot: Fourier
+/// components over the last `Nperiods` periods (default 9 harmonics, 1 period),
+/// as Log lines. Phases are sine-referenced at t = 0, as in SPICE.
+pub fn fourier(line: &str, p: &Plot, global: &HashMap<String, f64>) -> Result<Vec<String>, String> {
+    let words: Vec<&str> = line.split_whitespace().skip(1).collect();
+    let split = words.iter().position(|w| w.contains('(')).unwrap_or(words.len());
+    let (args, traces) = words.split_at(split);
+    if args.is_empty() || args.len() > 3 || traces.is_empty() {
+        return Err("expected .four <freq> [Nharmonics] [Nperiods] <trace> …".into());
+    }
+    let vars = |n: &str| global.get(n).copied();
+    let a = args
+        .iter()
+        .map(|s| Expr::parse(s.trim_matches(['{', '}']))?.eval(&PEnv { p, k: 0, vars: &vars }))
+        .collect::<Result<Vec<f64>, String>>()?;
+    let f0 = a[0];
+    let nharm = a.get(1).map_or(9, |&n| n.max(1.0) as usize);
+    let nper = a.get(2).copied().unwrap_or(1.0);
+    if !(f0 > 0.0 && nper > 0.0) {
+        return Err("frequency and Nperiods must be positive".into());
+    }
+    let (Some(&t1), Some(&tfirst)) = (p.x.last(), p.x.first()) else { return Err("empty transient".into()) };
+    let span = nper / f0;
+    let t0 = t1 - span;
+    if t0 < tfirst - 1e-9 * span {
+        return Err(format!("the saved transient is shorter than {nper} period(s) of {}Hz", crate::expr::fmt_si(f0)));
+    }
+    let step = if p.step.is_empty() { String::new() } else { format!("   [{}]", p.step) };
+    let mut out = vec![];
+    for tr in traces {
+        let y = eval_trace(p, tr)?;
+        // shortcut: linear interpolation onto a uniform grid, so accuracy follows the transient time step
+        const N: usize = 8192;
+        let w = 2.0 * std::f64::consts::PI * f0;
+        let (mut dc, mut cs, mut sn) = (0.0, vec![0.0; nharm + 1], vec![0.0; nharm + 1]);
+        for i in 0..N {
+            let t = t0 + span * i as f64 / N as f64;
+            let v = interp(&p.x, &y, t);
+            dc += v;
+            for h in 1..=nharm {
+                let (s, c) = (w * h as f64 * t).sin_cos();
+                cs[h] += v * c;
+                sn[h] += v * s;
+            }
+        }
+        let k = 2.0 / N as f64;
+        let mag: Vec<f64> = (0..=nharm).map(|h| k * cs[h].hypot(sn[h])).collect();
+        let ph: Vec<f64> = (0..=nharm).map(|h| cs[h].atan2(sn[h]).to_degrees()).collect();
+        out.push(format!("Fourier components of {tr}{step}"));
+        out.push(format!("DC component: {:.6e}", dc / N as f64));
+        out.push("Harmonic   Frequency     Fourier      Normalized    Phase      Normalized".into());
+        out.push(" Number       [Hz]       Component    Component    [degree]    Phase [deg]".into());
+        for h in 1..=nharm {
+            out.push(format!(
+                "{h:>5}      {:.4e}   {:.5e}   {:.5e}   {:>8.2}°   {:>8.2}°",
+                f0 * h as f64,
+                mag[h],
+                mag[h] / mag[1],
+                ph[h],
+                ph[h] - ph[1]
+            ));
+        }
+        let thd = mag[2..].iter().map(|m| m * m).sum::<f64>().sqrt() / mag[1] * 100.0;
+        out.push(format!("Total Harmonic Distortion: {thd:.6}%"));
+    }
+    Ok(out)
+}
