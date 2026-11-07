@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SwiftSim
+GenericName=Circuit Simulator
+Comment=SPICE circuit simulator with schematic editor and waveform viewer
+Exec=swiftsim %f
+Icon=swiftsim
+Terminal=false
+Categories=Development;Electronics;
+Keywords=SPICE;circuit;simulator;schematic;LTspice;
+MimeType=application/x-swiftsim;application/x-ltspice-schematic;

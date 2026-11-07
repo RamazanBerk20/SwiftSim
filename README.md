@@ -7,6 +7,31 @@ Single native binary, written in Rust (egui GUI, own simulation engine).
 ![Transient run with voltage and current panes](docs/transient.png)
 ![AC analysis Bode plot](docs/ac.png)
 
+## Install
+
+Prebuilt x86-64 packages are attached to each
+[release](https://github.com/RamazanBerk20/SwiftSim/releases).
+
+**Windows**
+- `SwiftSim-setup.exe`: installer. Installs for the current user (no admin needed),
+  adds a Start menu entry and opens `.sws` files with SwiftSim. It isn't code-signed, so
+  SmartScreen may warn: *More info → Run anyway*.
+- `swiftsim-windows-x86_64.zip`: portable. Unzip anywhere and run `swiftsim.exe`;
+  double-click `register-sws.cmd` once to open `.sws` files with that copy.
+
+**Linux**
+- `SwiftSim-x86_64.AppImage`: `chmod +x SwiftSim-x86_64.AppImage`, then run it.
+  Needs FUSE (like every AppImage) and glibc 2.39 or newer (Ubuntu 24.04, Fedora 40, current Arch).
+- `swiftsim-linux-x86_64.tar.gz`: extract and run `./install.sh`. It installs to `~/.local`
+  with a menu entry, icon and `.sws`/`.asc` file types (`sudo PREFIX=/usr/local ./install.sh`
+  installs for all users). To uninstall, delete `~/.local/bin/swiftsim`,
+  `~/.local/share/applications/swiftsim.desktop`, `~/.local/share/mime/packages/swiftsim.xml`
+  and `~/.local/share/icons/hicolor/*/apps/swiftsim.*`.
+
+Making a release: set `version` in `Cargo.toml`, then push a tag such as `v0.2.0`.
+`.github/workflows/release.yml` builds, tests and packages on Linux and Windows and publishes a
+GitHub Release with generated notes (tags containing `-`, e.g. `v0.2.0-rc1`, become pre-releases).
+
 ## Build & run
 
 Requires Rust 1.85+ (edition 2024).
@@ -119,8 +144,18 @@ src/measure.rs   .meas and plot expressions
 src/gui/         app shell, schematic model + netlister, canvas editor, waveform viewer
 tests/engine.rs  analytic checks (RC/RL/LC, AC, diodes, BJT, MOS, JFET, POLY/table/.func, .meas …)
 tests/models/    public vendor macromodels used by the tests
+assets/          app icon (SVG source, PNGs, .ico; render.sh regenerates them)
+packaging/       Linux .desktop/MIME/install.sh/AppImage script, Windows installer
 ```
 
 ```bash
 cargo test --release
 ```
+
+## License
+
+SwiftSim is licensed under either of [Apache License 2.0](LICENSE-APACHE) or
+[MIT](LICENSE-MIT), at your option.
+
+The model files in `tests/models/` (TI's LM358 and TL072 macromodels) are copyright Texas
+Instruments and are distributed under TI's own terms, not under SwiftSim's licenses.
