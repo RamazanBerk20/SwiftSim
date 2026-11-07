@@ -27,6 +27,8 @@ Prebuilt x86-64 packages are attached to each
   installs for all users). To uninstall, delete `~/.local/bin/swiftsim`,
   `~/.local/share/applications/swiftsim.desktop`, `~/.local/share/mime/packages/swiftsim.xml`
   and `~/.local/share/icons/hicolor/*/apps/swiftsim.*`.
+- Arch Linux (AUR): `swiftsim-bin` (release binary), `swiftsim` (built from the release
+  source) or `swiftsim-git` (latest `master`), e.g. `yay -S swiftsim-bin`.
 
 Making a release: set `version` in `Cargo.toml`, then push a tag such as `v0.2.0`.
 `.github/workflows/release.yml` builds, tests and packages on Linux and Windows and publishes a
@@ -200,7 +202,7 @@ src/gui/         app shell, schematic model + netlister, canvas editor, waveform
 tests/engine.rs  analytic checks (RC/RL/LC, AC, diodes, BJT, MOS, JFET, POLY/table/.func, .meas …)
 tests/models/    public vendor macromodels used by the tests
 assets/          app icon (SVG source, PNGs, .ico; render.sh regenerates them)
-packaging/       Linux .desktop/MIME/install.sh/AppImage script, Windows installer
+packaging/       Linux .desktop/MIME/install.sh/AppImage script, Windows installer, AUR PKGBUILDs
 tests/reference/ accuracy suite against ngspice (compare.py + netlists)
 ```
 
