@@ -1,0 +1,633 @@
+//! Schematic document: components, wires, directives; symbol geometry;
+//! connectivity and netlist generation.
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+pub type P = [i32; 2];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Kind {
+    Resistor,
+    Capacitor,
+    Inductor,
+    Diode,
+    Voltage,
+    Current,
+    Npn,
+    Pnp,
+    Nmos,
+    Pmos,
+    OpAmp,
+    Vcvs,
+    Vccs,
+    Behavioral,
+    Switch,
+    Ground,
+    Label,
+}
+
+impl Kind {
+    pub const ALL: [Kind; 17] = [
+        Kind::Resistor,
+        Kind::Capacitor,
+        Kind::Inductor,
+        Kind::Diode,
+        Kind::Voltage,
+        Kind::Current,
+        Kind::Npn,
+        Kind::Pnp,
+        Kind::Nmos,
+        Kind::Pmos,
+        Kind::OpAmp,
+        Kind::Vcvs,
+        Kind::Vccs,
+        Kind::Behavioral,
+        Kind::Switch,
+        Kind::Ground,
+        Kind::Label,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Kind::Resistor => "Resistor",
+            Kind::Capacitor => "Capacitor",
+            Kind::Inductor => "Inductor",
+            Kind::Diode => "Diode",
+            Kind::Voltage => "Voltage source",
+            Kind::Current => "Current source",
+            Kind::Npn => "NPN transistor",
+            Kind::Pnp => "PNP transistor",
+            Kind::Nmos => "N-MOSFET",
+            Kind::Pmos => "P-MOSFET",
+            Kind::OpAmp => "Op-amp",
+            Kind::Vcvs => "VCVS (E)",
+            Kind::Vccs => "VCCS (G)",
+            Kind::Behavioral => "Behavioral source (B)",
+            Kind::Switch => "Voltage switch (S)",
+            Kind::Ground => "Ground",
+            Kind::Label => "Net label",
+        }
+    }
+
+    pub fn category(self) -> &'static str {
+        match self {
+            Kind::Resistor | Kind::Capacitor | Kind::Inductor => "Passive",
+            Kind::Diode | Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos => "Semiconductor",
+            Kind::Voltage | Kind::Current | Kind::Vcvs | Kind::Vccs | Kind::Behavioral => "Sources",
+            Kind::OpAmp | Kind::Switch => "Blocks",
+            Kind::Ground | Kind::Label => "Wiring",
+        }
+    }
+
+    pub fn shortcut(self) -> Option<&'static str> {
+        Some(match self {
+            Kind::Resistor => "R",
+            Kind::Capacitor => "C",
+            Kind::Inductor => "L",
+            Kind::Diode => "D",
+            Kind::Voltage => "V",
+            Kind::Current => "I",
+            Kind::Npn => "Q",
+            Kind::Nmos => "M",
+            Kind::OpAmp => "U",
+            Kind::Ground => "G",
+            Kind::Label => "N",
+            _ => return None,
+        })
+    }
+
+    /// Reference prefix for auto naming (empty for ground/labels).
+    pub fn prefix(self) -> &'static str {
+        match self {
+            Kind::Resistor => "R",
+            Kind::Capacitor => "C",
+            Kind::Inductor => "L",
+            Kind::Diode => "D",
+            Kind::Voltage => "V",
+            Kind::Current => "I",
+            Kind::Npn | Kind::Pnp => "Q",
+            Kind::Nmos | Kind::Pmos => "M",
+            Kind::OpAmp => "U",
+            Kind::Vcvs => "E",
+            Kind::Vccs => "G",
+            Kind::Behavioral => "B",
+            Kind::Switch => "S",
+            Kind::Ground | Kind::Label => "",
+        }
+    }
+
+    pub fn default_value(self) -> &'static str {
+        match self {
+            Kind::Resistor => "1k",
+            Kind::Capacitor => "1u",
+            Kind::Inductor => "1m",
+            Kind::Diode => "1N4148",
+            Kind::Voltage => "5",
+            Kind::Current => "1m",
+            Kind::Npn => "2N3904",
+            Kind::Pnp => "2N3906",
+            Kind::Nmos => "2N7000",
+            Kind::Pmos => "BSS84",
+            Kind::OpAmp => "Aol=100k GBW=10Meg",
+            Kind::Vcvs | Kind::Vccs => "1",
+            Kind::Behavioral => "V=V(in)*2",
+            Kind::Switch => "SW",
+            Kind::Ground => "",
+            Kind::Label => "out",
+        }
+    }
+
+    /// Model kinds used to fill the model picker.
+    pub fn model_kinds(self) -> &'static [&'static str] {
+        match self {
+            Kind::Diode => &["d"],
+            Kind::Npn => &["npn"],
+            Kind::Pnp => &["pnp"],
+            Kind::Nmos => &["nmos", "vdmos"],
+            Kind::Pmos => &["pmos", "vdmos"],
+            Kind::Switch => &["sw"],
+            _ => &[],
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Component {
+    pub kind: Kind,
+    pub name: String,
+    pub value: String,
+    pub pos: P,
+    pub rot: u8,
+    pub mirror: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Wire {
+    pub a: P,
+    pub b: P,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Text {
+    pub pos: P,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Schematic {
+    pub comps: Vec<Component>,
+    pub wires: Vec<Wire>,
+    pub texts: Vec<Text>,
+}
+
+/// Drawing primitive in local grid units.
+pub enum Prim {
+    Line(Vec<[f32; 2]>),
+    Circle([f32; 2], f32),
+    Poly(Vec<[f32; 2]>),
+    Text([f32; 2], &'static str),
+}
+
+/// Pins in local grid units, in netlist order.
+pub fn pins(k: Kind) -> &'static [P] {
+    match k {
+        Kind::Resistor | Kind::Capacitor | Kind::Inductor | Kind::Diode | Kind::Voltage | Kind::Current | Kind::Behavioral => &[[0, -2], [0, 2]],
+        Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos => &[[1, -2], [-2, 0], [1, 2]],
+        Kind::OpAmp => &[[-2, 1], [-2, -1], [2, 0]],
+        Kind::Vcvs | Kind::Vccs | Kind::Switch => &[[0, -2], [0, 2], [-2, -1], [-2, 1]],
+        Kind::Ground | Kind::Label => &[[0, 0]],
+    }
+}
+
+fn arc(cx: f32, cy: f32, r: f32, a0: f32, a1: f32) -> Vec<[f32; 2]> {
+    (0..=12).map(|i| {
+        let a = a0 + (a1 - a0) * i as f32 / 12.0;
+        [cx + r * a.cos(), cy + r * a.sin()]
+    })
+    .collect()
+}
+
+pub fn symbol(k: Kind) -> Vec<Prim> {
+    use Prim::*;
+    let pi = std::f32::consts::PI;
+    match k {
+        Kind::Resistor => vec![
+            Line(vec![[0., -2.], [0., -1.2], [0.4, -1.0], [-0.4, -0.6], [0.4, -0.2], [-0.4, 0.2], [0.4, 0.6], [-0.4, 1.0], [0., 1.2], [0., 2.]]),
+        ],
+        Kind::Capacitor => vec![
+            Line(vec![[0., -2.], [0., -0.25]]),
+            Line(vec![[-0.8, -0.25], [0.8, -0.25]]),
+            Line(vec![[-0.8, 0.25], [0.8, 0.25]]),
+            Line(vec![[0., 0.25], [0., 2.]]),
+        ],
+        Kind::Inductor => {
+            let mut v = vec![Line(vec![[0., -2.], [0., -1.4]]), Line(vec![[0., 1.4], [0., 2.]])];
+            for i in 0..4 {
+                let cy = -1.05 + 0.7 * i as f32;
+                v.push(Line(arc(0.0, cy, 0.35, -pi / 2.0, pi / 2.0)));
+            }
+            v
+        }
+        Kind::Diode => vec![
+            Line(vec![[0., -2.], [0., -0.5]]),
+            Poly(vec![[-0.6, -0.5], [0.6, -0.5], [0., 0.5]]),
+            Line(vec![[-0.6, 0.5], [0.6, 0.5]]),
+            Line(vec![[0., 0.5], [0., 2.]]),
+        ],
+        Kind::Voltage => vec![
+            Line(vec![[0., -2.], [0., -1.]]),
+            Circle([0., 0.], 1.0),
+            Line(vec![[0., 1.], [0., 2.]]),
+            Line(vec![[-0.25, -0.5], [0.25, -0.5]]),
+            Line(vec![[0., -0.75], [0., -0.25]]),
+            Line(vec![[-0.25, 0.5], [0.25, 0.5]]),
+        ],
+        Kind::Current => vec![
+            Line(vec![[0., -2.], [0., -1.]]),
+            Circle([0., 0.], 1.0),
+            Line(vec![[0., 1.], [0., 2.]]),
+            Line(vec![[0., -0.6], [0., 0.5]]),
+            Poly(vec![[-0.25, 0.2], [0.25, 0.2], [0., 0.6]]),
+        ],
+        Kind::Npn | Kind::Pnp => {
+            let mut v = vec![
+                Line(vec![[-2., 0.], [-0.5, 0.]]),
+                Line(vec![[-0.5, -0.9], [-0.5, 0.9]]),
+                Line(vec![[-0.5, -0.4], [1., -1.1], [1., -2.]]),
+                Line(vec![[-0.5, 0.4], [1., 1.1], [1., 2.]]),
+                Circle([0.2, 0.], 1.35),
+            ];
+            v.push(if k == Kind::Npn {
+                Poly(vec![[0.95, 1.08], [0.45, 1.1], [0.68, 0.7]])
+            } else {
+                Poly(vec![[-0.45, 0.43], [0.0, 0.42], [-0.18, 0.82]])
+            });
+            v
+        }
+        Kind::Nmos | Kind::Pmos => {
+            let mut v = vec![
+                Line(vec![[-2., 0.], [-0.8, 0.]]),
+                Line(vec![[-0.8, -0.8], [-0.8, 0.8]]),
+                Line(vec![[-0.5, -1.0], [-0.5, -0.45]]),
+                Line(vec![[-0.5, -0.25], [-0.5, 0.25]]),
+                Line(vec![[-0.5, 0.45], [-0.5, 1.0]]),
+                Line(vec![[-0.5, -0.7], [1., -0.7], [1., -2.]]),
+                Line(vec![[-0.5, 0.7], [1., 0.7], [1., 2.]]),
+                Line(vec![[-0.5, 0.], [1., 0.], [1., 0.7]]),
+            ];
+            v.push(if k == Kind::Nmos {
+                Poly(vec![[-0.45, 0.], [-0.05, -0.22], [-0.05, 0.22]])
+            } else {
+                Poly(vec![[0.45, 0.], [0.05, -0.22], [0.05, 0.22]])
+            });
+            v
+        }
+        Kind::OpAmp => vec![
+            Poly(vec![[-1.5, -1.8], [-1.5, 1.8], [1.6, 0.]]),
+            Line(vec![[-2., -1.], [-1.5, -1.]]),
+            Line(vec![[-2., 1.], [-1.5, 1.]]),
+            Line(vec![[1.6, 0.], [2., 0.]]),
+            Line(vec![[-1.3, -1.], [-0.9, -1.]]),
+            Line(vec![[-1.3, 1.], [-0.9, 1.]]),
+            Line(vec![[-1.1, 0.8], [-1.1, 1.2]]),
+        ],
+        Kind::Vcvs | Kind::Vccs | Kind::Behavioral => {
+            let mut v = vec![
+                Line(vec![[0., -2.], [0., -1.]]),
+                Line(vec![[0., -1.], [1., 0.], [0., 1.], [-1., 0.], [0., -1.]]),
+                Line(vec![[0., 1.], [0., 2.]]),
+            ];
+            if k == Kind::Vccs {
+                v.push(Line(vec![[0., -0.55], [0., 0.45]]));
+                v.push(Poly(vec![[-0.2, 0.15], [0.2, 0.15], [0., 0.5]]));
+            } else {
+                v.push(Line(vec![[-0.2, -0.45], [0.2, -0.45]]));
+                v.push(Line(vec![[0., -0.65], [0., -0.25]]));
+                v.push(Line(vec![[-0.2, 0.45], [0.2, 0.45]]));
+            }
+            if k != Kind::Behavioral {
+                v.push(Line(vec![[-2., -1.], [-1.4, -1.]]));
+                v.push(Line(vec![[-2., 1.], [-1.4, 1.]]));
+                v.push(Text([-1.5, -1.5], "+"));
+                v.push(Text([-1.5, 1.5], "−"));
+            }
+            v
+        }
+        Kind::Switch => vec![
+            Line(vec![[0., -2.], [0., -0.8]]),
+            Line(vec![[0., 0.8], [0., 2.]]),
+            Line(vec![[0., 0.8], [0.6, -0.7]]),
+            Circle([0., -0.8], 0.1),
+            Circle([0., 0.8], 0.1),
+            Line(vec![[-2., -1.], [-1.2, -1.]]),
+            Line(vec![[-2., 1.], [-1.2, 1.]]),
+            Line(vec![[-1.2, -1.], [-1.2, 1.]]),
+            Text([-1.6, -1.5], "+"),
+            Text([-1.6, 1.5], "−"),
+        ],
+        Kind::Ground => vec![
+            Line(vec![[0., 0.], [0., 0.6]]),
+            Line(vec![[-0.8, 0.6], [0.8, 0.6]]),
+            Line(vec![[-0.5, 0.9], [0.5, 0.9]]),
+            Line(vec![[-0.2, 1.2], [0.2, 1.2]]),
+        ],
+        Kind::Label => vec![],
+    }
+}
+
+/// Local bounding box (min, max) of a symbol.
+pub fn bbox(k: Kind) -> ([f32; 2], [f32; 2]) {
+    match k {
+        Kind::Resistor | Kind::Inductor | Kind::Diode | Kind::Capacitor => ([-0.8, -2.0], [0.8, 2.0]),
+        Kind::Voltage | Kind::Current | Kind::Behavioral => ([-1.0, -2.0], [1.0, 2.0]),
+        Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos => ([-2.0, -2.0], [1.6, 2.0]),
+        Kind::OpAmp => ([-2.0, -1.8], [2.0, 1.8]),
+        Kind::Vcvs | Kind::Vccs | Kind::Switch => ([-2.0, -2.0], [1.0, 2.0]),
+        Kind::Ground => ([-0.8, 0.0], [0.8, 1.3]),
+        Kind::Label => ([-0.3, -0.6], [3.0, 0.3]),
+    }
+}
+
+impl Component {
+    pub fn tf(&self, p: [f32; 2]) -> [f32; 2] {
+        let (mut x, mut y) = (p[0], p[1]);
+        if self.mirror {
+            x = -x;
+        }
+        // counter-clockwise on screen: pin 1 of a once-rotated part ends up on the left
+        for _ in 0..(self.rot % 4) {
+            (x, y) = (y, -x);
+        }
+        [x + self.pos[0] as f32, y + self.pos[1] as f32]
+    }
+    pub fn pin_pos(&self) -> Vec<P> {
+        pins(self.kind)
+            .iter()
+            .map(|p| {
+                let q = self.tf([p[0] as f32, p[1] as f32]);
+                [q[0].round() as i32, q[1].round() as i32]
+            })
+            .collect()
+    }
+    pub fn world_bbox(&self) -> ([f32; 2], [f32; 2]) {
+        let (a, b) = bbox(self.kind);
+        let c = [self.tf(a), self.tf(b), self.tf([a[0], b[1]]), self.tf([b[0], a[1]])];
+        let min = [c.iter().map(|p| p[0]).fold(f32::MAX, f32::min), c.iter().map(|p| p[1]).fold(f32::MAX, f32::min)];
+        let max = [c.iter().map(|p| p[0]).fold(f32::MIN, f32::max), c.iter().map(|p| p[1]).fold(f32::MIN, f32::max)];
+        (min, max)
+    }
+    /// Signal to probe when the component body is clicked.
+    pub fn current_signal(&self) -> Option<String> {
+        let n = self.spice_name();
+        Some(match self.kind {
+            Kind::Ground | Kind::Label | Kind::OpAmp => return None,
+            Kind::Npn | Kind::Pnp => format!("Ic({n})"),
+            Kind::Nmos | Kind::Pmos => format!("Id({n})"),
+            _ => format!("I({n})"),
+        })
+    }
+    pub fn spice_name(&self) -> String {
+        let p = self.kind.prefix();
+        if self.kind == Kind::OpAmp {
+            return format!("X{}", self.name);
+        }
+        if p.is_empty() || self.name.to_ascii_uppercase().starts_with(p) { self.name.clone() } else { format!("{p}{}", self.name) }
+    }
+}
+
+pub fn on_segment(p: P, w: &Wire) -> bool {
+    let (ax, ay, bx, by) = (w.a[0] as i64, w.a[1] as i64, w.b[0] as i64, w.b[1] as i64);
+    let (px, py) = (p[0] as i64, p[1] as i64);
+    let cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+    cross == 0 && px >= ax.min(bx) && px <= ax.max(bx) && py >= ay.min(by) && py <= ay.max(by)
+}
+
+struct Dsu(Vec<usize>);
+impl Dsu {
+    fn find(&mut self, i: usize) -> usize {
+        let mut r = i;
+        while self.0[r] != r {
+            r = self.0[r];
+        }
+        let mut i = i;
+        while self.0[i] != r {
+            let n = self.0[i];
+            self.0[i] = r;
+            i = n;
+        }
+        r
+    }
+    fn union(&mut self, a: usize, b: usize) {
+        let (a, b) = (self.find(a), self.find(b));
+        if a != b {
+            self.0[a] = b;
+        }
+    }
+}
+
+pub const OPAMP_SUBCKT: &str = "\
+.subckt swiftsim_opamp inp inn out params: aol=100k gbw=10meg rout=10
+Rin inp inn 10meg
+G1 0 n1 inp inn 1m
+R1 n1 0 {aol/1m}
+C1 n1 0 {1m/(2*pi*gbw)}
+E1 o 0 n1 0 1
+Rout o out {rout}
+.ends";
+
+pub struct Netlist {
+    pub text: String,
+    /// Net name of every connection point.
+    pub nets: HashMap<P, String>,
+    /// Number of connections at each point (for junction dots).
+    pub degree: HashMap<P, usize>,
+}
+
+impl Schematic {
+    pub fn connectivity(&self) -> (Vec<P>, Vec<usize>, HashMap<P, usize>) {
+        let mut pts: Vec<P> = vec![];
+        let mut idx: HashMap<P, usize> = HashMap::new();
+        let mut add = |p: P, pts: &mut Vec<P>| {
+            *idx.entry(p).or_insert_with(|| {
+                pts.push(p);
+                pts.len() - 1
+            })
+        };
+        for c in &self.comps {
+            for p in c.pin_pos() {
+                add(p, &mut pts);
+            }
+        }
+        for w in &self.wires {
+            add(w.a, &mut pts);
+            add(w.b, &mut pts);
+        }
+        let mut d = Dsu((0..pts.len()).collect());
+        for w in &self.wires {
+            let ia = idx[&w.a];
+            for (i, p) in pts.iter().enumerate() {
+                if on_segment(*p, w) {
+                    d.union(ia, i);
+                }
+            }
+        }
+        // labels with the same name are one net; all grounds are one net
+        let mut by_name: HashMap<String, usize> = HashMap::new();
+        for c in &self.comps {
+            let key = match c.kind {
+                Kind::Ground => "0".to_string(),
+                Kind::Label if !c.value.trim().is_empty() => c.value.trim().to_ascii_lowercase(),
+                _ => continue,
+            };
+            let i = idx[&c.pin_pos()[0]];
+            match by_name.get(&key) {
+                Some(&j) => d.union(i, j),
+                None => {
+                    by_name.insert(key, i);
+                }
+            }
+        }
+        let roots: Vec<usize> = (0..pts.len()).map(|i| d.find(i)).collect();
+        (pts, roots, idx)
+    }
+
+    pub fn netlist(&self) -> Netlist {
+        let (pts, roots, idx) = self.connectivity();
+        let mut names: HashMap<usize, String> = HashMap::new();
+        for c in &self.comps {
+            let r = roots[idx[&c.pin_pos()[0]]];
+            match c.kind {
+                Kind::Ground => {
+                    names.insert(r, "0".into());
+                }
+                Kind::Label if !c.value.trim().is_empty() => {
+                    names.entry(r).or_insert_with(|| c.value.trim().to_string());
+                }
+                _ => {}
+            }
+        }
+        let mut k = 0;
+        for &r in &roots {
+            names.entry(r).or_insert_with(|| {
+                k += 1;
+                format!("N{k:03}")
+            });
+        }
+        let nets: HashMap<P, String> = pts.iter().enumerate().map(|(i, p)| (*p, names[&roots[i]].clone())).collect();
+        let mut degree: HashMap<P, usize> = HashMap::new();
+        for c in &self.comps {
+            for p in c.pin_pos() {
+                *degree.entry(p).or_default() += 1;
+            }
+        }
+        for w in &self.wires {
+            for p in pts.iter() {
+                if on_segment(*p, w) {
+                    *degree.entry(*p).or_default() += if *p == w.a || *p == w.b { 1 } else { 2 };
+                }
+            }
+        }
+
+        let mut t = String::from("* SwiftSim schematic\n");
+        let mut opamp = false;
+        for c in &self.comps {
+            let n: Vec<&str> = c.pin_pos().iter().map(|p| nets[p].as_str()).collect();
+            let v = c.value.trim();
+            let name = c.spice_name();
+            let line = match c.kind {
+                Kind::Ground | Kind::Label => continue,
+                Kind::Resistor | Kind::Capacitor | Kind::Inductor | Kind::Voltage | Kind::Current | Kind::Behavioral => {
+                    format!("{name} {} {} {v}", n[0], n[1])
+                }
+                Kind::Diode => format!("{name} {} {} {}", n[0], n[1], if v.is_empty() { "D" } else { v }),
+                Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos => {
+                    let def = match c.kind {
+                        Kind::Npn => "NPN",
+                        Kind::Pnp => "PNP",
+                        Kind::Nmos => "NMOS",
+                        _ => "PMOS",
+                    };
+                    format!("{name} {} {} {} {}", n[0], n[1], n[2], if v.is_empty() { def } else { v })
+                }
+                Kind::OpAmp => {
+                    opamp = true;
+                    format!("{name} {} {} {} swiftsim_opamp {v}", n[0], n[1], n[2])
+                }
+                Kind::Vcvs | Kind::Vccs | Kind::Switch => format!("{name} {} {} {} {} {v}", n[0], n[1], n[2], n[3]),
+            };
+            t.push_str(&line);
+            t.push('\n');
+        }
+        for d in &self.texts {
+            for l in d.text.lines() {
+                t.push_str(l.trim());
+                t.push('\n');
+            }
+        }
+        if opamp {
+            t.push_str(OPAMP_SUBCKT);
+            t.push('\n');
+        }
+        t.push_str(".end\n");
+        Netlist { text: t, nets, degree }
+    }
+
+    pub fn next_name(&self, k: Kind) -> String {
+        let p = k.prefix();
+        if p.is_empty() {
+            return String::new();
+        }
+        let used: Vec<u32> = self
+            .comps
+            .iter()
+            .filter(|c| c.kind.prefix() == p)
+            .filter_map(|c| c.name.to_ascii_uppercase().strip_prefix(p).and_then(|s| s.parse().ok()))
+            .collect();
+        let mut i = 1;
+        while used.contains(&i) {
+            i += 1;
+        }
+        format!("{p}{i}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn comp(kind: Kind, name: &str, value: &str, pos: P) -> Component {
+        Component { kind, name: name.into(), value: value.into(), pos, rot: 0, mirror: false }
+    }
+
+    #[test]
+    fn divider_netlist_runs() {
+        // V1 at (0,0): pins (0,-2) (0,2). R1 at (4,0) pins (4,-2) (4,2); R2 at (4,4) pins (4,2) (4,6)
+        let s = Schematic {
+            comps: vec![
+                comp(Kind::Voltage, "V1", "10", [0, 0]),
+                comp(Kind::Resistor, "R1", "1k", [4, 0]),
+                comp(Kind::Resistor, "R2", "1k", [4, 4]),
+                comp(Kind::Ground, "", "", [0, 6]),
+                comp(Kind::Ground, "", "", [4, 6]),
+                comp(Kind::Label, "", "out", [6, 2]),
+            ],
+            wires: vec![Wire { a: [0, -2], b: [4, -2] }, Wire { a: [0, 2], b: [0, 6] }, Wire { a: [4, 2], b: [6, 2] }],
+            texts: vec![Text { pos: [0, 10], text: ".op".into() }],
+        };
+        let n = s.netlist();
+        assert!(n.text.contains("R2 out 0 1k"), "{}", n.text);
+        let r = swiftsim::run_netlist(&n.text, None, &swiftsim::Control::default()).unwrap();
+        let p = &r.plots[0];
+        let v = p.re[p.index("v(out)").unwrap()][0];
+        assert!((v - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn t_junction_mid_wire_connects() {
+        let s = Schematic { comps: vec![], wires: vec![Wire { a: [0, 0], b: [10, 0] }, Wire { a: [5, 0], b: [5, 5] }], texts: vec![] };
+        let n = s.netlist();
+        assert_eq!(n.nets[&[0, 0]], n.nets[&[5, 5]]);
+        assert_eq!(n.degree[&[5, 0]], 3);
+    }
+}

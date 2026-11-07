@@ -1,0 +1,17 @@
+[package]
+name = "swiftsim"
+version = "0.1.0"
+edition = "2024"
+
+description = "Fast, open-source SPICE circuit simulator with a modern schematic editor and waveform viewer"
+license = "MIT OR Apache-2.0"
+
+[profile.release]
+lto = "thin"
+
+[dependencies]
+eframe = "0.37.0"
+egui_plot = "0.38.0"
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
