@@ -19,8 +19,15 @@ use swiftsim::{Control, PlotKind, SimResult};
 use waveform::WaveView;
 
 pub fn run(file: Option<String>) -> eframe::Result {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icons/256.png")).expect("bundled icon is a valid PNG");
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1440.0, 900.0]).with_min_inner_size([900.0, 600.0]).with_title("SwiftSim"),
+        // app_id must match swiftsim.desktop so Wayland compositors show the icon.
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([900.0, 600.0])
+            .with_title("SwiftSim")
+            .with_app_id("swiftsim")
+            .with_icon(icon),
         ..Default::default()
     };
     eframe::run_native("SwiftSim", opts, Box::new(move |cc| Ok(Box::new(App::new(cc, file)))))

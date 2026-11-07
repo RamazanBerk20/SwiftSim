@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-swiftsim">
+    <comment>SwiftSim schematic</comment>
+    <sub-class-of type="application/json"/>
+    <icon name="swiftsim"/>
+    <glob pattern="*.sws"/>
+  </mime-type>
+  <!-- *.asc is shared with PGP armor; the magic tells LTspice files apart (ASCII or UTF-16LE). -->
+  <mime-type type="application/x-ltspice-schematic">
+    <comment>LTspice schematic</comment>
+    <sub-class-of type="text/plain"/>
+    <glob pattern="*.asc"/>
+    <magic priority="60">
+      <match type="string" offset="0" value="Version 4"/>
+      <match type="string" offset="0" value="\xff\xfeV\x00e\x00r\x00s\x00i\x00o\x00n\x00"/>
+    </magic>
+  </mime-type>
+</mime-info>
