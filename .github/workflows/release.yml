@@ -30,7 +30,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: 1 # runners have no FUSE
           ARCH: x86_64
         run: |
-          curl -fsSL -o "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          curl -fsSL --retry 6 --retry-delay 20 --retry-all-errors -o "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
           chmod +x "$RUNNER_TEMP/appimagetool"
           packaging/linux/package.sh "$RUNNER_TEMP/appimagetool"
 

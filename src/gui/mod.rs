@@ -591,6 +591,12 @@ impl App {
                         ui.close();
                     }
                 });
+                ui.separator();
+                if ui.button(tr("Reset layout")).clicked() {
+                    // panels fall back to their `default_size` once their saved state is gone
+                    ctx.data_mut(|d| d.remove_by_type::<egui::containers::panel::PanelState>());
+                    ui.close();
+                }
             });
             i18n::menu(ui, tr("Simulate"), |ui| {
                 if item(ui, tr("Run"), "F5").clicked() {
