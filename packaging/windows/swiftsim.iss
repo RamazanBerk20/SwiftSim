@@ -30,7 +30,12 @@ Name: desktopicon; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm
 Source: "{#Exe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE-MIT"; DestDir: "{app}"
 Source: "..\..\LICENSE-APACHE"; DestDir: "{app}"
+Source: "..\..\LICENSE-OFL"; DestDir: "{app}"
 Source: "..\..\README.md"; DestDir: "{app}"
+
+[UninstallDelete]
+; the previous version, moved aside by the in-app updater
+Type: files; Name: "{app}\swiftsim.exe.old"
 
 [Icons]
 Name: "{autoprograms}\SwiftSim"; Filename: "{app}\swiftsim.exe"

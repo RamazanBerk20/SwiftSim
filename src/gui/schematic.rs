@@ -556,7 +556,7 @@ impl Schematic {
         for c in &self.comps {
             let key = match c.kind {
                 Kind::Ground => "0".to_string(),
-                Kind::Label if !c.value.trim().is_empty() => c.value.trim().to_ascii_lowercase(),
+                Kind::Label if !c.value.trim().is_empty() => swiftsim::expr::fold(c.value.trim()),
                 _ => continue,
             };
             let i = idx[&c.pin_pos()[0]];
@@ -569,6 +569,28 @@ impl Schematic {
         }
         let roots: Vec<usize> = (0..pts.len()).map(|i| d.find(i)).collect();
         (pts, roots, idx)
+    }
+
+    /// Warnings for net labels that are different words but one net, such as `kır` and `kir`.
+    pub fn name_conflicts(&self) -> Vec<String> {
+        let mut first: HashMap<String, &str> = HashMap::new();
+        let mut out = vec![];
+        for c in self.comps.iter().filter(|c| c.kind == Kind::Label) {
+            let v = c.value.trim();
+            match first.get(&swiftsim::expr::fold(v)) {
+                None => {
+                    first.insert(swiftsim::expr::fold(v), v);
+                }
+                Some(f) if swiftsim::expr::distinct_spellings(f, v) => {
+                    let msg = format!("warning: net labels '{f}' and '{v}' are one net (names ignore case, and ı and İ count as i)");
+                    if !out.contains(&msg) {
+                        out.push(msg);
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     pub fn netlist(&self) -> Netlist {

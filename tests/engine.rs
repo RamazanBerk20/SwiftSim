@@ -22,6 +22,50 @@ fn close(a: f64, b: f64, rel: f64) {
 }
 
 #[test]
+fn unicode_node_names_ignore_case() {
+    // each pair is one node, so these are 2:1 dividers from 3 V: 1 V across the bottom resistor
+    let decomposed_c = "c\u{327}ıkış"; // ç written as c + combining cedilla
+    for (a, b) in [("Çıkış", "çıkış"), ("ÇIKIŞ", "çıkış"), ("GİRİŞ", "giriş"), ("ВЫХОД", "выход"), ("STRASSE", "straße"), ("ΑΣ", "ας"), ("出力", "出力"), ("خرج", "خرج"), (decomposed_c, "çıkış")] {
+        let r = sim(&format!("div\nV1 1 0 3\nR1 1 {a} 2k\nR2 {b} 0 1k\n.op\n"));
+        let p = &r.plots[0];
+        close(sig(p, &format!("v({a})"))[0], 1.0, 1e-9);
+        close(swiftsim::measure::eval_trace(p, &format!("V({b})")).unwrap()[0], 1.0, 1e-9);
+        assert!(!r.log.iter().any(|l| l.starts_with("warning")), "{a}/{b}: {:?}", r.log);
+    }
+}
+
+#[test]
+fn emoji_node_names_work_and_ignore_variation_selectors() {
+    let family = "👨\u{200D}👩\u{200D}👧";
+    for (a, b) in [("🙂", "🙂"), ("❤", "❤\u{FE0F}"), (family, family), ("🇹🇷", "🇹🇷"), ("👍🏽", "👍🏽")] {
+        let r = sim(&format!("div\nV1 1 0 3\nR1 1 {a} 2k\nR2 {b} 0 1k\n.op\n"));
+        let p = &r.plots[0];
+        close(sig(p, &format!("v({b})"))[0], 1.0, 1e-9);
+        assert!(!r.log.iter().any(|l| l.starts_with("warning")), "{a}/{b}: {:?}", r.log);
+        assert!(p.names.iter().any(|n| n == &format!("v({a})")), "{:?}", p.names);
+    }
+}
+
+#[test]
+fn unicode_names_keep_their_spelling_in_the_results() {
+    // the fold key of ÇIKIŞ is çikiş, which must never reach the user
+    let r = sim("d\nV1 ÇIKIŞ 0 1\nR1 çıkış 0 1k\n.op\n.meas op değer FIND V(çıkış)\n");
+    let p = &r.plots[0];
+    assert!(p.names.iter().any(|n| n == "v(ÇIKIŞ)"), "{:?}", p.names);
+    assert!(r.log.iter().any(|l| l.contains("v(ÇIKIŞ)")), "{:?}", r.log);
+    assert!(!r.log.iter().chain(&p.names).any(|l| l.contains("çikiş")), "{:?}", r.log);
+    assert_eq!(swiftsim::to_csv(&r.plots).lines().next().unwrap().matches("v(ÇIKIŞ)").count(), 1);
+}
+
+#[test]
+fn different_words_folded_together_are_reported() {
+    // kır (field) and kir (dirt) share a key: still one node, but the user is told
+    let r = sim("d\nV1 kır 0 2\nR1 kir 0 1k\n.op\n");
+    close(sig(&r.plots[0], "i(r1)")[0], 2e-3, 1e-6);
+    assert!(r.log.iter().any(|l| l.starts_with("warning") && l.contains("kır") && l.contains("kir")), "{:?}", r.log);
+}
+
+#[test]
 fn divider_op() {
     let r = sim("div\nV1 1 0 10\nR1 1 2 1k\nR2 2 0 1k\n.op\n");
     let p = &r.plots[0];

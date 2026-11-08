@@ -15,14 +15,18 @@ list and the "Not yet supported" section (the roadmap is whatever is listed ther
 | `src/netlist.rs` | LTspice-dialect parser, `.include/.lib` (incl. LTspice's installed library), `.subckt` flattening, models, built-in model library, `.step`/`.param` |
 | `src/sim.rs` | `.op .dc .ac .tran .tf .noise`, `.step` orchestration, OP/noise/.four reports |
 | `src/measure.rs` | `.meas`, `.four`, plot-trace expressions |
-| `src/main.rs` | CLI: GUI by default, `-b file` batch mode |
+| `src/main.rs` | CLI: GUI by default, `-b file` batch mode, `--mcp` server |
+| `src/mcp.rs` | MCP server on stdio for coding agents: `simulate`, `schematic_netlist`, `open_in_gui` |
 | `src/gui/mod.rs` | app shell, menus, panels, simulation thread, examples, file I/O |
 | `src/gui/schematic.rs` | schematic model, symbols/pins, netlister, file format + `upgrade()` |
 | `src/gui/editor.rs` | canvas: tools, selection, wiring, undo, probing, drawing |
 | `src/gui/waveform.rs` | plots (V/A panes, Bode, noise, FFT), cursors, CSV |
 | `src/gui/asc.rs` | LTspice `.asc`/`.asy` import |
 | `src/gui/session.rs` | autosave/crash recovery, recent files |
-| `src/gui/update.rs` | update check against GitHub releases |
+| `src/gui/update.rs` | update check against GitHub releases, in-place install |
+| `src/gui/i18n.rs` | UI languages (`tr`, `trf`, `para`), mirrored layout helpers; texts in `src/gui/lang/<code>.json` |
+| `src/gui/bidi.rs` | Unicode bidi on top of egui: `display` for labels, `line`/`code` text fields with correct caret and selection |
+| `src/gui/fonts.rs` | bundled color emoji (always), system fonts, then the bundled last-resort fonts (`assets/fonts/fallback.bin`, built by `assets/fonts/build.py`) |
 | `tests/engine.rs` | engine tests against analytic or hand-calculated results |
 | `tests/reference/` | ngspice comparison suite (`compare.py` + netlists) |
 | `packaging/` | Linux desktop/MIME/AppImage, Windows Inno Setup, AUR PKGBUILDs |
@@ -59,9 +63,24 @@ Rust 1.89+ (edition 2024; `File::try_lock`). The release profile uses thin LTO.
   that pattern for any resizable panel whose content fills it.
 - **Never block the UI thread:** simulations and the update check run on threads and report
   over channels; the app calls `request_repaint` when they finish.
-- **The update check** (`update.rs`) only reads the public release list. Errors from the
-  automatic check stay silent. Release candidates are offered newer candidates; stable builds
-  only stable releases.
+- **Updates** (`update.rs`): errors from the automatic check stay silent. Release candidates are
+  offered newer candidates; stable builds only stable releases. *Install update* only takes files
+  from this repo's release page, checks the size, runs the new program's `--help` and requires the
+  new tag in its output before replacing anything. Only stamped release builds (`SWIFTSIM_VERSION`)
+  outside `/usr` update themselves. The asset names in `plan()` must match `release.yml` and
+  `package.sh`; the tarball's layout must match `unpack()`.
+- **UI text goes through `i18n`.** The English text is the key: `tr("Save")`, `trf("Saved {}", &[&p])`,
+  and `para(...)` for paragraphs that wrap in a side panel. A new or changed text needs an entry in
+  every `src/gui/lang/*.json`; `every_language_covers_every_text` fails otherwise. Engine log lines
+  stay English (the log colours lines by their `warning`/`error` prefix).
+- **Node names compare by `expr::fold`** (NFC, case-folded, `ı` and `İ` count as `i`), never
+  `to_ascii_lowercase`, and never by a locale. Non-ASCII names keep their first spelling in results
+  (`Deck::spelling`); `Plot::names` holds that spelling, so look signals up with `Plot::index`.
+- **Right-to-left UI.** Wrap a new panel or dialog's contents in `i18n::mirrored`, two-column forms
+  in `i18n::form_row`, and use `i18n::para` for wrapping paragraphs. User-editable text goes through
+  `bidi::line` or `bidi::code`, not a bare `TextEdit` (they also keep the caret out of multi-part
+  emoji); the canvas draws names through `bidi::display`.
+  The schematic, plots, netlists and the Log stay left to right.
 
 ## Testing the GUI on a developer machine
 

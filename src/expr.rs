@@ -1,6 +1,31 @@
 //! SPICE numbers (with SI suffixes) and an expression language shared by
 //! `.param`, `{...}` values, behavioral sources, `.meas` and plot traces.
 
+/// Comparison key of a node or signal name: two names are the same net when their keys are equal.
+/// Independent of the locale, so a file means the same on every machine: normalized (NFC, so a
+/// decomposed `ç` equals a composed one), case-folded, and Turkish `ı` and `İ` count as `i`, because
+/// SPICE needs `I` to equal `i` while Turkish pairs `I` with `ı`.
+pub fn fold(s: &str) -> String {
+    if s.is_ascii() {
+        return s.to_ascii_lowercase();
+    }
+    normalized(s).to_lowercase().replace("i\u{307}", "i").replace('ı', "i").replace('ς', "σ").replace('ß', "ss")
+}
+
+/// NFC, without the variation selectors some keyboards add to emoji (❤ and ❤️ are one name).
+fn normalized(s: &str) -> String {
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(s).replace(['\u{FE0E}', '\u{FE0F}'], "")
+}
+
+/// True when two spellings with the same `fold` key look like different words, such as `kır` and
+/// `kir`: they differ in the plain lowercase and in the Turkish one. Case variants never count
+/// (`KIR` is `kır` or `kir`, depending on who wrote it).
+pub fn distinct_spellings(a: &str, b: &str) -> bool {
+    let plain = |s: &str| normalized(s).to_lowercase();
+    let turkish = |s: &str| normalized(s).replace('I', "ı").replace('İ', "i").to_lowercase();
+    plain(a) != plain(b) && turkish(a) != turkish(b)
+}
+
 /// Parse a SPICE number: `1k`, `4.7u`, `1meg`, `10uF`, `4k7`, `1e-3`.
 /// Trailing unit letters are ignored, as in SPICE.
 pub fn parse_number(s: &str) -> Option<f64> {
@@ -595,7 +620,7 @@ impl Parser<'_> {
                 // raw node / device names: may be numeric or contain '.' ':'
                 let st = self.i + 1;
                 let end = self.src[st..].find(')').ok_or("missing ')'")? + st;
-                let inner = self.src[st..end].to_ascii_lowercase();
+                let inner = fold(&self.src[st..end]);
                 self.i = end + 1;
                 let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
                 if name == "v" {

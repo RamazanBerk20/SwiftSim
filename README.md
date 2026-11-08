@@ -30,6 +30,11 @@ Prebuilt x86-64 packages are attached to each
 - Arch Linux (AUR): `swiftsim-bin` (release binary), `swiftsim` (built from the release
   source) or `swiftsim-git` (latest `master`), e.g. `yay -S swiftsim-bin`.
 
+The AppImage, the tarball install and the Windows packages update themselves: when a newer release
+exists, *Install update* downloads it, replaces the program and offers to restart (a copy in Program
+Files shows the administrator prompt). AUR and other package-manager installs update through the
+package manager, and builds from source only link to the release.
+
 Making a release: set `version` in `Cargo.toml`, then push a tag such as `v0.2.0`.
 `.github/workflows/release.yml` builds, tests and packages on Linux and Windows and publishes a
 GitHub Release with generated notes (tags containing `-`, e.g. `v0.2.0-rc1`, become pre-releases).
@@ -163,6 +168,41 @@ set `SWIFTSIM_LTSPICE_LIB`:
 SWIFTSIM_LTSPICE_LIB=~/.wine/drive_c/users/$USER/AppData/Local/LTspice/lib ./target/release/swiftsim -b my.asc
 ```
 
+## Languages
+
+The interface comes in English, Turkish, Spanish, French, German, Russian, Arabic, Japanese, Chinese and
+Korean: it follows the system language, or pick one under *View → Language*. In Arabic the interface is
+mirrored; the schematic, plots and netlists stay left-to-right, as circuit diagrams and code do.
+
+Net labels and text can use any script. Fonts for nearly every writing system are built in and used only
+when your system has none for a script. Right-to-left text displays and edits correctly in every field.
+Emoji work in net labels and text too, in color on every machine, including flags, skin tones and
+family sequences.
+
+Net names ignore case in every script, on every machine: `ÇIKIŞ` and `çıkış` are one net, and results
+keep the spelling you used. An emoji is the same name with or without its invisible variation selector
+(`❤` and `❤️`). Because SPICE needs `I` to equal `i` while Turkish pairs `I` with `ı`,
+`ı` and `İ` count as `i`; different words that collide this way (`kır` and `kir`) stay one net and the
+Log warns about them.
+
+## Coding agents (MCP)
+
+`swiftsim --mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on stdio, so a
+coding agent can run circuits and read the numbers. With Claude Code:
+
+```bash
+claude mcp add swiftsim -- swiftsim --mcp
+```
+
+Other clients take the same command in their MCP configuration. *Help → Copy MCP server command* copies
+it with the full path to this copy, which is what you want on Windows or with the AppImage.
+
+| Tool | What it does |
+|---|---|
+| `simulate` | Runs netlist text or a `.sws`/`.asc`/`.cir` file; returns the log, `.meas` results, signal names and sampled `traces` (`V(out)`, `I(R1)`, …; AC as dB and degrees); `csv` also writes every point to a file |
+| `schematic_netlist` | The SPICE netlist of a `.sws` or `.asc` schematic |
+| `open_in_gui` | Opens a circuit file in a new SwiftSim window |
+
 ## Not yet supported (compared with LTSpice)
 
 Being explicit, since the goal is LTSpice parity:
@@ -197,11 +237,15 @@ src/devices.rs   device models and stamps
 src/netlist.rs   parser, subcircuit flattening, models, built-in library
 src/sim.rs       OP / DC / AC / noise / transient, .step orchestration
 src/measure.rs   .meas and plot expressions
+src/mcp.rs       MCP server for coding agents (swiftsim --mcp)
 src/gui/         app shell, schematic model + netlister, canvas editor, waveform viewer,
-                 recovery copies + recent files (session.rs)
+                 recovery copies + recent files (session.rs), updates (update.rs),
+                 UI languages (i18n.rs, lang/*.json), right-to-left text (bidi.rs),
+                 fallback fonts (fonts.rs)
 tests/engine.rs  analytic checks (RC/RL/LC, AC, diodes, BJT, MOS, JFET, POLY/table/.func, .meas …)
 tests/models/    public vendor macromodels used by the tests
-assets/          app icon (SVG source, PNGs, .ico; render.sh regenerates them)
+assets/          app icon (SVG source, PNGs, .ico; render.sh regenerates them), fallback
+                 fonts (fonts/build.py regenerates them)
 packaging/       Linux .desktop/MIME/install.sh/AppImage script, Windows installer, AUR PKGBUILDs
 tests/reference/ accuracy suite against ngspice (compare.py + netlists)
 ```
@@ -232,6 +276,9 @@ and only the Python standard library. Tolerances: `.op`/`.dc` 1e-6 relative at e
 
 SwiftSim is licensed under either of [Apache License 2.0](LICENSE-APACHE) or
 [MIT](LICENSE-MIT), at your option.
+
+The fonts compiled into the program (`assets/fonts/fallback.bin`, from the Noto project) are under the
+[SIL Open Font License 1.1](LICENSE-OFL).
 
 The model files in `tests/models/` (TI's LM358 and TL072 macromodels) are copyright Texas
 Instruments and are distributed under TI's own terms, not under SwiftSim's licenses.

@@ -1,7 +1,10 @@
 //! Desktop application shell.
 
 pub mod asc;
+mod bidi;
 mod editor;
+mod fonts;
+mod i18n;
 mod schematic;
 mod session;
 pub mod update;
@@ -9,13 +12,15 @@ mod waveform;
 
 use eframe::egui;
 use editor::{Editor, Tool};
+use bidi::Base;
+use i18n::{para, tr, trf};
 use egui::{Color32, CornerRadius, Key, Modifiers, RichText, Sense, Shape, Stroke, Vec2};
 use schematic::{Component, Kind, Schematic, Text, Wire};
 use serde::{Deserialize, Serialize};
 use session::{Doc, Recovery, Snapshot};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 use swiftsim::netlist::tokenize;
@@ -34,6 +39,8 @@ pub fn run(file: Option<String>) -> eframe::Result {
             .with_icon(icon),
         // window geometry, panel sizes and `Settings`
         persistence_path: Some(config_dir().join("settings.ron")),
+        // replaced by `fonts::Fallback`, which also has fonts of its own
+        system_font_fallback: false,
         ..Default::default()
     };
     eframe::run_native("SwiftSim", opts, Box::new(move |cc| Ok(Box::new(App::new(cc, file)))))
@@ -58,6 +65,7 @@ enum Pending {
     Open,
     OpenPath(PathBuf),
     Example(usize),
+    Restart(PathBuf),
     Quit,
 }
 
@@ -69,6 +77,9 @@ struct Settings {
     last_dir: Option<PathBuf>,
     #[serde(default = "yes")]
     check_updates: bool,
+    /// UI language code; `None` follows the system.
+    #[serde(default)]
+    lang: Option<String>,
 }
 
 fn yes() -> bool {
@@ -113,11 +124,21 @@ struct App {
     update: Option<update::Release>,
     /// Running update check and whether the user started it (then "up to date" and errors are shown).
     update_rx: Option<(Receiver<Result<Option<update::Release>, String>>, bool)>,
+    /// What "Install update" would download and replace; `None` when this copy can't update itself.
+    update_plan: Option<(update::Asset, PathBuf)>,
+    /// Running install: progress in 1/1000 and the result (new version, path to start).
+    install: Option<(Arc<AtomicU32>, Receiver<Result<(String, PathBuf), String>>)>,
+    /// Update installed: waiting for the user to answer the restart question.
+    restart: Option<(String, PathBuf)>,
+    lang: Option<String>,
 }
 
 impl App {
     fn new(cc: &eframe::CreationContext, file: Option<String>) -> App {
-        let set = cc.storage.and_then(|s| eframe::get_value::<Settings>(s, eframe::APP_KEY)).unwrap_or(Settings { dark: true, show_op: true, last_dir: None, check_updates: true });
+        let set = cc.storage.and_then(|s| eframe::get_value::<Settings>(s, eframe::APP_KEY)).unwrap_or(Settings { dark: true, show_op: true, last_dir: None, check_updates: true, lang: None });
+        i18n::set(set.lang.as_deref());
+        cc.egui_ctx.add_font_provider(Arc::new(fonts::Fallback::new()));
+        update::cleanup();
         cc.egui_ctx.set_theme(if set.dark { egui::Theme::Dark } else { egui::Theme::Light });
         let (rec, orphans) = Recovery::start(&config_dir());
         let lib = lib_setting().and_then(|f| std::fs::read_to_string(f).ok()).map(|s| s.trim().to_string());
@@ -137,7 +158,7 @@ impl App {
             filter: String::new(),
             confirm: None,
             allow_close: false,
-            status: "Ready. Pick a part on the left (or press R, C, L, V, G, W…), press F5 to simulate.".into(),
+            status: tr("Ready. Pick a part on the left (or press R, C, L, V, G, W…), press F5 to simulate.").into(),
             title: String::new(),
             dark: set.dark,
             last_dir: set.last_dir,
@@ -147,6 +168,10 @@ impl App {
             check_updates: set.check_updates,
             update: None,
             update_rx: None,
+            update_plan: None,
+            install: None,
+            restart: None,
+            lang: set.lang,
         };
         app.ed.show_op = set.show_op;
         if app.check_updates {
@@ -174,7 +199,7 @@ impl App {
         let text = match std::fs::read(&p) {
             Ok(b) => swiftsim::netlist::decode(&b),
             Err(e) => {
-                self.status = format!("Cannot open {}: {e}", p.display());
+                self.status = trf("Cannot open {}: {}", &[&p.display(), &e]);
                 return;
             }
         };
@@ -186,7 +211,7 @@ impl App {
                     self.ed.load(s);
                 }
                 Err(e) => {
-                    self.status = format!("Not a SwiftSim schematic: {e}");
+                    self.status = trf("Not a SwiftSim schematic: {}", &[&e]);
                     return;
                 }
             }
@@ -196,7 +221,7 @@ impl App {
             self.net_dirty = false;
             self.tab = Tab::Log;
         }
-        self.status = format!("Opened {}", p.display());
+        self.status = trf("Opened {}", &[&p.display()]);
         self.remember(&p);
         self.path = Some(p);
         self.notes.clear();
@@ -208,7 +233,7 @@ impl App {
         let bytes = match std::fs::read(&p) {
             Ok(b) => b,
             Err(e) => {
-                self.status = format!("Cannot open {}: {e}", p.display());
+                self.status = trf("Cannot open {}: {}", &[&p.display(), &e]);
                 return;
             }
         };
@@ -219,10 +244,10 @@ impl App {
         self.notes = skipped.iter().map(|n| format!("warning: LTspice symbol '{n}' has no SwiftSim equivalent and no subcircuit .asy for it was found (next to the schematic or in LTspice's lib/sym); it was left out (its nets are open)")).collect();
         self.log = self.notes.clone();
         self.status = if skipped.is_empty() {
-            format!("Imported LTspice schematic {}", p.display())
+            trf("Imported LTspice schematic {}", &[&p.display()])
         } else {
             self.tab = Tab::Log;
-            format!("Imported {} — WARNING: unsupported LTspice symbols left out (their nets are open): {}", p.display(), skipped.join(", "))
+            trf("Imported {} — WARNING: unsupported LTspice symbols left out (their nets are open): {}", &[&p.display(), &skipped.join(", ")])
         };
         // save next to the .asc as .sws (keeps relative .lib/.include paths working), never over the .asc itself
         let sws = p.with_extension("sws");
@@ -237,7 +262,7 @@ impl App {
             (Some(p), false) => p.clone(),
             _ => {
                 let d = self.dialog();
-                let d = if schematic { d.add_filter("SwiftSim schematic", &["sws"]).set_file_name("circuit.sws") } else { d.add_filter("SPICE netlist", &["cir", "net", "sp", "spi"]).set_file_name("circuit.cir") };
+                let d = if schematic { d.add_filter(tr("SwiftSim schematic"), &["sws"]).set_file_name("circuit.sws") } else { d.add_filter(tr("SPICE netlist"), &["cir", "net", "sp", "spi"]).set_file_name("circuit.cir") };
                 match d.save_file() {
                     Some(p) => p,
                     None => return,
@@ -247,13 +272,13 @@ impl App {
         let data = if schematic { serde_json::to_string_pretty(&self.ed.sch).unwrap_or_default() } else { self.net_text.clone() };
         match std::fs::write(&path, data) {
             Ok(()) => {
-                self.status = format!("Saved {}", path.display());
+                self.status = trf("Saved {}", &[&path.display()]);
                 self.remember(&path);
                 self.path = Some(path);
                 self.ed.dirty = false;
                 self.net_dirty = false;
             }
-            Err(e) => self.status = format!("Save failed: {e}"),
+            Err(e) => self.status = trf("Save failed: {}", &[&e]),
         }
     }
 
@@ -279,7 +304,7 @@ impl App {
             Mode::Netlist => Doc::Netlist(self.net_text.clone()),
         };
         if let Err(e) = self.rec.write(&Snapshot { path: self.path.clone(), doc }) {
-            self.status = format!("Autosave failed: {e}");
+            self.status = trf("Autosave failed: {}", &[&e]);
         }
     }
 
@@ -298,8 +323,8 @@ impl App {
                 self.tab = Tab::Log;
             }
         }
-        let name = s.path.as_ref().map_or("untitled".into(), |p| p.display().to_string());
-        self.status = format!("Restored unsaved changes to {name} — not saved yet (Ctrl+S)");
+        let name = s.path.as_ref().map_or(tr("untitled").into(), |p| p.display().to_string());
+        self.status = trf("Restored unsaved changes to {} — not saved yet (Ctrl+S)", &[&name]);
         self.path = s.path;
         self.notes.clear();
         self.results = None;
@@ -319,10 +344,10 @@ impl App {
             Pending::Open => {
                 if let Some(p) = self
                     .dialog()
-                    .add_filter("All supported", &["sws", "asc", "cir", "net", "sp", "spi", "txt"])
-                    .add_filter("SwiftSim schematic", &["sws"])
-                    .add_filter("LTspice schematic", &["asc"])
-                    .add_filter("SPICE netlist", &["cir", "net", "sp", "spi", "txt"])
+                    .add_filter(tr("All supported"), &["sws", "asc", "cir", "net", "sp", "spi", "txt"])
+                    .add_filter(tr("SwiftSim schematic"), &["sws"])
+                    .add_filter(tr("LTspice schematic"), &["asc"])
+                    .add_filter(tr("SPICE netlist"), &["cir", "net", "sp", "spi", "txt"])
                     .pick_file()
                 {
                     self.open_path(p);
@@ -336,6 +361,14 @@ impl App {
                 self.notes.clear();
                 self.results = None;
                 self.waves.traces.clear();
+            }
+            Pending::Restart(exe) => {
+                let mut c = std::process::Command::new(&exe);
+                c.args(&self.path);
+                match c.spawn() {
+                    Ok(_) => self.do_pending(Pending::Quit, ctx),
+                    Err(e) => self.status = trf("Couldn't start {}: {}", &[&exe.display(), &e]),
+                }
             }
             Pending::Quit => {
                 self.allow_close = true;
@@ -363,17 +396,22 @@ impl App {
             self.autosave();
         }
         let text = self.netlist_text();
+        let conflicts = if self.mode == Mode::Schematic { self.ed.sch.name_conflicts() } else { vec![] };
         let base = self.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let ctl = Arc::new(Control::default());
         let (tx, rx) = channel();
         let (c2, ctx2) = (ctl.clone(), ctx.clone());
         std::thread::spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| swiftsim::run_netlist(&text, base.as_deref(), &c2)));
-            let _ = tx.send(r.unwrap_or_else(|_| Err("internal simulator error (panic) — please report this netlist".into())));
+            let r = r.unwrap_or_else(|_| Err("internal simulator error (panic) — please report this netlist".into()));
+            let _ = tx.send(r.map(|mut res: SimResult| {
+                res.log.splice(0..0, conflicts);
+                res
+            }));
             ctx2.request_repaint();
         });
         self.job = Some(Job { ctl, rx, started: Instant::now() });
-        self.status = "Simulating…".into();
+        self.status = tr("Simulating…").into();
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
@@ -382,7 +420,7 @@ impl App {
             Err(TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(60)),
             Err(TryRecvError::Disconnected) => {
                 self.job = None;
-                self.status = "Simulation thread stopped unexpectedly".into();
+                self.status = tr("Simulation thread stopped unexpectedly").into();
             }
             Ok(r) => {
                 let secs = job.started.elapsed().as_secs_f64();
@@ -396,7 +434,7 @@ impl App {
                             let p = &res.plots[0];
                             for (n, v) in p.names.iter().zip(&p.re) {
                                 if let Some(net) = n.strip_prefix("v(").and_then(|s| s.strip_suffix(')')) {
-                                    self.ed.op_values.insert(net.to_string(), v[0]);
+                                    self.ed.op_values.insert(swiftsim::expr::fold(net), v[0]);
                                 }
                             }
                             self.tab = Tab::Log;
@@ -417,17 +455,20 @@ impl App {
                         }
                         self.waves.generation += 1;
                         let warn = res.log.iter().filter(|l| l.starts_with("warning")).count();
-                        self.status = format!(
-                            "Done in {secs:.2} s{}{}",
-                            if warn > 0 { format!(" · {warn} warning(s), see Log") } else { String::new() },
-                            if self.ed.tool == Tool::Probe { " · Probe: click a wire for voltage, a part for current (Esc to edit)" } else { "" }
-                        );
+                        let mut parts = vec![trf("Done in {} s", &[&format!("{secs:.2}")])];
+                        if warn > 0 {
+                            parts.push(trf("{} warning(s), see Log", &[&warn]));
+                        }
+                        if self.ed.tool == Tool::Probe {
+                            parts.push(tr("Probe: click a wire for voltage, a part for current (Esc to edit)").into());
+                        }
+                        self.status = parts.join(" · ");
                         self.results = Some(res);
                     }
                     Err(e) => {
                         self.log = self.notes.iter().cloned().chain([format!("error: {e}")]).collect();
                         self.tab = Tab::Log;
-                        self.status = format!("Simulation failed: {e}");
+                        self.status = trf("Simulation failed: {}", &[&e]);
                     }
                 }
             }
@@ -436,20 +477,20 @@ impl App {
 
     fn menu(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                if ui.button("New schematic       Ctrl+N").clicked() {
+        egui::MenuBar::new().ui(ui, |ui| i18n::bar(ui, |ui| {
+            i18n::menu(ui, tr("File"), |ui| {
+                if item(ui, tr("New schematic"), "Ctrl+N").clicked() {
                     self.request(Pending::New, &ctx);
                     ui.close();
                 }
-                if ui.button("Open…               Ctrl+O").clicked() {
+                if item(ui, tr("Open…"), "Ctrl+O").clicked() {
                     self.request(Pending::Open, &ctx);
                     ui.close();
                 }
-                ui.menu_button("Open recent", |ui| {
+                i18n::submenu(ui, tr("Open recent"), |ui| {
                     let recent = session::recent(&config_dir());
                     if recent.is_empty() {
-                        ui.weak("No recent files");
+                        ui.weak(tr("No recent files"));
                     }
                     for p in recent {
                         let name = p.file_name().map_or(p.display().to_string(), |n| n.to_string_lossy().to_string());
@@ -459,26 +500,26 @@ impl App {
                         }
                     }
                 });
-                if ui.button("Save                Ctrl+S").clicked() {
+                if item(ui, tr("Save"), "Ctrl+S").clicked() {
                     self.save(false);
                     ui.close();
                 }
-                if ui.button("Save as…").clicked() {
+                if ui.button(tr("Save as…")).clicked() {
                     self.save(true);
                     ui.close();
                 }
                 ui.separator();
-                if self.mode == Mode::Schematic && ui.button("Export SPICE netlist…").clicked() {
-                    if let Some(p) = self.dialog().add_filter("SPICE netlist", &["cir"]).set_file_name("circuit.cir").save_file() {
+                if self.mode == Mode::Schematic && ui.button(tr("Export SPICE netlist…")).clicked() {
+                    if let Some(p) = self.dialog().add_filter(tr("SPICE netlist"), &["cir"]).set_file_name("circuit.cir").save_file() {
                         let t = self.ed.netlist().text.clone();
                         self.status = match std::fs::write(&p, t) {
-                            Ok(()) => format!("Exported {}", p.display()),
-                            Err(e) => format!("Export failed: {e}"),
+                            Ok(()) => trf("Exported {}", &[&p.display()]),
+                            Err(e) => trf("Export failed: {}", &[&e]),
                         };
                     }
                     ui.close();
                 }
-                if ui.button("Open netlist as text editor").clicked() {
+                if ui.button(tr("Open netlist as text editor")).clicked() {
                     let t = self.netlist_text();
                     self.mode = Mode::Netlist;
                     self.net_text = t;
@@ -487,60 +528,76 @@ impl App {
                     ui.close();
                 }
                 ui.separator();
-                if ui.button("Quit").clicked() {
+                if ui.button(tr("Quit")).clicked() {
                     self.request(Pending::Quit, &ctx);
                     ui.close();
                 }
             });
-            ui.menu_button("Edit", |ui| {
+            i18n::menu(ui, tr("Edit"), |ui| {
                 let ed = &mut self.ed;
-                if ui.button("Undo            Ctrl+Z").clicked() {
+                if item(ui, tr("Undo"), "Ctrl+Z").clicked() {
                     ed.undo();
                 }
-                if ui.button("Redo            Ctrl+Y").clicked() {
+                if item(ui, tr("Redo"), "Ctrl+Y").clicked() {
                     ed.redo();
                 }
                 ui.separator();
-                if ui.button("Cut             Ctrl+X").clicked() {
+                if item(ui, tr("Cut"), "Ctrl+X").clicked() {
                     ed.copy();
                     ed.delete_selected();
                 }
-                if ui.button("Copy            Ctrl+C").clicked() {
+                if item(ui, tr("Copy"), "Ctrl+C").clicked() {
                     ed.copy();
                 }
-                if ui.button("Paste           Ctrl+V").clicked() {
+                if item(ui, tr("Paste"), "Ctrl+V").clicked() {
                     ed.paste();
                 }
-                if ui.button("Delete          Del").clicked() {
+                if item(ui, tr("Delete"), "Del").clicked() {
                     ed.delete_selected();
                 }
-                if ui.button("Select all      Ctrl+A").clicked() {
+                if item(ui, tr("Select all"), "Ctrl+A").clicked() {
                     ed.select_all();
                 }
                 ui.separator();
-                if ui.button("Rotate          Ctrl+R").clicked() {
+                if item(ui, tr("Rotate"), "Ctrl+R").clicked() {
                     ed.rotate();
                 }
-                if ui.button("Mirror          Ctrl+E").clicked() {
+                if item(ui, tr("Mirror"), "Ctrl+E").clicked() {
                     ed.mirror();
                 }
             });
-            ui.menu_button("View", |ui| {
-                if ui.button("Zoom to fit     Space").clicked() {
+            i18n::menu(ui, tr("View"), |ui| {
+                if item(ui, tr("Zoom to fit"), "Space").clicked() {
                     self.ed.fit();
                     ui.close();
                 }
-                ui.checkbox(&mut self.ed.show_op, "Show operating-point voltages");
-                if ui.checkbox(&mut self.dark, "Dark theme").changed() {
+                ui.checkbox(&mut self.ed.show_op, tr("Show operating-point voltages"));
+                if ui.checkbox(&mut self.dark, tr("Dark theme")).changed() {
                     ui.ctx().set_theme(if self.dark { egui::Theme::Dark } else { egui::Theme::Light });
                 }
+                i18n::submenu(ui, tr("Language"), |ui| {
+                    let mut pick = None;
+                    if ui.radio(self.lang.is_none(), tr("System default")).clicked() {
+                        pick = Some(None);
+                    }
+                    for (code, name) in i18n::LANGS {
+                        if ui.radio(self.lang.as_deref() == Some(code), name).clicked() {
+                            pick = Some(Some(code.to_string()));
+                        }
+                    }
+                    if let Some(l) = pick {
+                        i18n::set(l.as_deref());
+                        self.lang = l;
+                        ui.close();
+                    }
+                });
             });
-            ui.menu_button("Simulate", |ui| {
-                if ui.button("Run             F5").clicked() {
+            i18n::menu(ui, tr("Simulate"), |ui| {
+                if item(ui, tr("Run"), "F5").clicked() {
                     self.run_sim(&ctx);
                     ui.close();
                 }
-                if ui.add_enabled(self.job.is_some(), egui::Button::new("Stop")).clicked() {
+                if ui.add_enabled(self.job.is_some(), egui::Button::new(tr("Stop"))).clicked() {
                     if let Some(j) = &self.job {
                         j.ctl.cancel.store(true, Ordering::Relaxed);
                     }
@@ -549,23 +606,24 @@ impl App {
                 ui.separator();
                 let manual = lib_setting().is_some_and(|f| f.exists());
                 ui.weak(match swiftsim::netlist::ltspice_lib() {
-                    Some(p) => format!("LTspice library: {}{}", p.display(), if manual { "" } else { " (auto-detected)" }),
-                    None => "LTspice library: not found (LTspice's own models are unavailable)".into(),
+                    Some(p) if manual => trf("LTspice library: {}", &[&p.display()]),
+                    Some(p) => trf("LTspice library: {} (auto-detected)", &[&p.display()]),
+                    None => tr("LTspice library: not found (LTspice's own models are unavailable)").into(),
                 });
-                if ui.button("Choose LTspice library folder…").on_hover_text("LTspice's lib folder, with cmp/ and sub/ inside. Models missing from the netlist are read from it.").clicked() {
+                if ui.button(tr("Choose LTspice library folder…")).on_hover_text(i18n::para_in(ui, "LTspice's lib folder, with cmp/ and sub/ inside. Models missing from the netlist are read from it.", 300.0)).clicked() {
                     if let Some(d) = rfd::FileDialog::new().pick_folder() {
                         let saved = lib_setting().ok_or("no config folder".to_string()).and_then(|f| {
                             std::fs::create_dir_all(f.parent().unwrap_or(&f)).and_then(|_| std::fs::write(&f, d.to_string_lossy().as_bytes())).map_err(|e| e.to_string())
                         });
                         self.status = match saved {
-                            Ok(()) => format!("LTspice library set to {}", d.display()),
-                            Err(e) => format!("LTspice library set to {} for this session (not saved: {e})", d.display()),
+                            Ok(()) => trf("LTspice library set to {}", &[&d.display()]),
+                            Err(e) => trf("LTspice library set to {} for this session (not saved: {})", &[&d.display(), &e]),
                         };
                         swiftsim::netlist::set_ltspice_lib(Some(d));
                     }
                     ui.close();
                 }
-                if manual && ui.button("Auto-detect LTspice library").clicked() {
+                if manual && ui.button(tr("Auto-detect LTspice library")).clicked() {
                     if let Some(f) = lib_setting() {
                         let _ = std::fs::remove_file(f);
                     }
@@ -573,17 +631,17 @@ impl App {
                     ui.close();
                 }
             });
-            ui.menu_button("Examples", |ui| {
+            i18n::menu(ui, tr("Examples"), |ui| {
                 for (i, (name, _)) in examples().iter().enumerate() {
-                    if ui.button(*name).clicked() {
+                    if ui.button(tr(*name)).clicked() {
                         self.request(Pending::Example(i), &ctx);
                         ui.close();
                     }
                 }
             });
-            ui.menu_button("Help", |ui| {
-                ui.label(RichText::new("Keyboard").strong());
-                for (k, d) in [
+            i18n::menu(ui, tr("Help"), |ui| {
+                ui.label(RichText::new(tr("Keyboard")).strong());
+                let keys = [
                     ("R C L D V I Q M U", "place part"),
                     ("G / N", "ground / net label"),
                     ("W or F3", "wire (click points; click a pin to finish)"),
@@ -594,36 +652,44 @@ impl App {
                     ("Space", "zoom to fit"),
                     ("Middle/right drag", "pan; wheel zooms"),
                     ("F5", "run simulation"),
-                ] {
-                    ui.horizontal(|ui| {
-                        ui.monospace(format!("{k:<18}"));
-                        ui.label(d);
-                    });
-                }
+                ];
+                egui::Grid::new("keys").num_columns(2).show(ui, |ui| {
+                    for (k, d) in keys {
+                        i18n::form_row(ui, tr(d), |ui| {
+                            ui.monospace(tr(k));
+                        });
+                    }
+                });
                 ui.separator();
-                ui.label("Supported: .op .tran .ac .dc .tf .noise .four .temp .step .meas .param .ic .model .subckt .include/.lib .options");
-                ui.label("Elements: R C L K V I D Q M(level1/VDMOS) E F G H B S X");
+                ui.label(format!("{} .op .tran .ac .dc .tf .noise .four .temp .step .meas .param .ic .model .subckt .include/.lib .options", tr("Supported:")));
+                ui.label(format!("{} R C L K V I D Q M(level1/VDMOS) E F G H B S X", tr("Elements:")));
                 ui.separator();
                 ui.label(format!("SwiftSim {}", update::VERSION));
-                if ui.button("Check for updates now").clicked() {
+                if ui.button(tr("Check for updates now")).clicked() {
                     self.start_update_check(&ctx, true);
                     ui.close();
                 }
-                ui.checkbox(&mut self.check_updates, "Check for updates at startup");
+                ui.checkbox(&mut self.check_updates, tr("Check for updates at startup"));
+                ui.separator();
+                if ui.button(tr("Copy MCP server command")).on_hover_text(i18n::para_in(ui, "Lets a coding agent run simulations: add this command to it as an MCP server.", 300.0)).clicked() {
+                    ui.ctx().copy_text(format!("\"{}\" --mcp", update::self_path().display()));
+                    self.status = tr("MCP server command copied.").into();
+                    ui.close();
+                }
             });
-        });
+        }));
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.horizontal(|ui| {
             if let Some(j) = &self.job {
-                if ui.button(RichText::new("■ Stop").color(Color32::from_rgb(255, 99, 99))).clicked() {
+                if ui.button(RichText::new(i18n::with_symbol("■", tr("Stop"))).color(Color32::from_rgb(255, 99, 99))).clicked() {
                     j.ctl.cancel.store(true, Ordering::Relaxed);
                 }
                 let p = j.ctl.progress.load(Ordering::Relaxed) as f32 / 1000.0;
                 ui.add(egui::ProgressBar::new(p).desired_width(160.0).show_percentage());
-            } else if ui.button(RichText::new("▶ Run").color(Color32::from_rgb(102, 220, 120)).strong()).on_hover_text("Run simulation (F5)").clicked() {
+            } else if ui.button(RichText::new(i18n::with_symbol("▶", tr("Run"))).color(Color32::from_rgb(102, 220, 120)).strong()).on_hover_text(tr("Run simulation (F5)")).clicked() {
                 self.run_sim(&ctx);
             }
             ui.separator();
@@ -637,32 +703,32 @@ impl App {
                     (".Text", Tool::Text, "SPICE directive (T)"),
                     ("Probe", Tool::Probe, "Click wire → voltage, part → current (P)"),
                 ] {
-                    if ui.selectable_label(t == tool, label).on_hover_text(tip).clicked() {
+                    if ui.selectable_label(t == tool, tr(label)).on_hover_text(tr(tip)).clicked() {
                         self.ed.set_tool(tool);
                     }
                 }
                 ui.separator();
-                if ui.button("⟲").on_hover_text("Undo (Ctrl+Z)").clicked() {
+                if ui.button("⟲").on_hover_text(tr("Undo (Ctrl+Z)")).clicked() {
                     self.ed.undo();
                 }
-                if ui.button("⟳").on_hover_text("Redo (Ctrl+Y)").clicked() {
+                if ui.button("⟳").on_hover_text(tr("Redo (Ctrl+Y)")).clicked() {
                     self.ed.redo();
                 }
-                if ui.button("Rotate").on_hover_text("Ctrl+R").clicked() {
+                if ui.button(tr("Rotate")).on_hover_text("Ctrl+R").clicked() {
                     self.ed.rotate();
                 }
-                if ui.button("Mirror").on_hover_text("Ctrl+E").clicked() {
+                if ui.button(tr("Mirror")).on_hover_text("Ctrl+E").clicked() {
                     self.ed.mirror();
                 }
-                if ui.button("Delete").on_hover_text("Del").clicked() {
+                if ui.button(tr("Delete")).on_hover_text("Del").clicked() {
                     self.ed.delete_selected();
                 }
-                if ui.button("Fit").on_hover_text("Space").clicked() {
+                if ui.button(tr("Fit")).on_hover_text("Space").clicked() {
                     self.ed.fit();
                 }
             } else {
-                ui.label(RichText::new("Netlist mode").strong());
-                if ui.button("New schematic").clicked() {
+                ui.label(RichText::new(tr("Netlist mode")).strong());
+                if ui.button(tr("New schematic")).clicked() {
                     self.request(Pending::New, &ctx);
                 }
             }
@@ -671,16 +737,16 @@ impl App {
 
     fn palette(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("Search parts…"));
+        bidi::line(ui, &mut self.filter, Base::Auto, |t| t.hint_text(tr("Search parts…")));
         ui.add_space(4.0);
-        let f = self.filter.to_ascii_lowercase();
+        let f = self.filter.to_lowercase();
         egui::ScrollArea::vertical().show(ui, |ui| {
             for cat in ["Passive", "Semiconductor", "Sources", "Blocks", "Wiring"] {
-                let items: Vec<Kind> = Kind::ALL.into_iter().filter(|k| k.category() == cat && k.title().to_ascii_lowercase().contains(&f)).collect();
+                let items: Vec<Kind> = Kind::ALL.into_iter().filter(|k| k.category() == cat && (tr(k.title()).to_lowercase().contains(&f) || k.title().to_lowercase().contains(&f))).collect();
                 if items.is_empty() {
                     continue;
                 }
-                ui.label(RichText::new(cat).small().weak());
+                ui.label(RichText::new(tr(cat)).small().weak());
                 for k in items {
                     let active = self.ed.tool == Tool::Place(k);
                     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
@@ -688,11 +754,16 @@ impl App {
                     if active || resp.hovered() {
                         ui.painter().rect_filled(rect, CornerRadius::same(4), vis.bg_fill);
                     }
-                    let icon = egui::Rect::from_min_size(rect.min + Vec2::new(4.0, 3.0), Vec2::splat(28.0));
+                    // icon and title on the reading side, shortcut on the other
+                    let rtl = i18n::is_rtl_ui();
+                    let icon_x = if rtl { rect.right() - 32.0 } else { rect.left() + 4.0 };
+                    let icon = egui::Rect::from_min_size(egui::pos2(icon_x, rect.top() + 3.0), Vec2::splat(28.0));
                     draw_icon(ui.painter(), icon, k, vis.text_color());
-                    ui.painter().text(rect.min + Vec2::new(40.0, 17.0), egui::Align2::LEFT_CENTER, k.title(), egui::FontId::proportional(13.0), vis.text_color());
+                    let (title_at, title_align) = if rtl { (rect.right() - 40.0, egui::Align2::RIGHT_CENTER) } else { (rect.left() + 40.0, egui::Align2::LEFT_CENTER) };
+                    ui.painter().text(egui::pos2(title_at, rect.top() + 17.0), title_align, tr(k.title()), egui::FontId::proportional(13.0), vis.text_color());
                     if let Some(s) = k.shortcut() {
-                        ui.painter().text(rect.right_center() - Vec2::new(8.0, 0.0), egui::Align2::RIGHT_CENTER, s, egui::FontId::monospace(11.0), ui.visuals().weak_text_color());
+                        let (key_at, key_align) = if rtl { (rect.left() + 8.0, egui::Align2::LEFT_CENTER) } else { (rect.right() - 8.0, egui::Align2::RIGHT_CENTER) };
+                        ui.painter().text(egui::pos2(key_at, rect.center().y), key_align, s, egui::FontId::monospace(11.0), ui.visuals().weak_text_color());
                     }
                     if resp.clicked() {
                         self.ed.set_tool(Tool::Place(k));
@@ -712,10 +783,10 @@ impl App {
             self.comp_props(ui, i, focus);
         } else if sel.texts.len() == 1 && sel.comps.is_empty() {
             let i = *sel.texts.iter().next().unwrap();
-            ui.heading("SPICE directive");
-            ui.weak("Lines are added to the netlist as-is.");
+            ui.heading(tr("SPICE directive"));
+            ui.weak(para(ui, "Lines are added to the netlist as-is."));
             let mut t = self.ed.sch.texts[i].text.clone();
-            let r = ui.add(egui::TextEdit::multiline(&mut t).code_editor().desired_rows(6).desired_width(f32::INFINITY));
+            let r = bidi::code(ui, &mut t, |e| e.desired_rows(6).desired_width(f32::INFINITY));
             if focus {
                 r.request_focus();
             }
@@ -727,11 +798,11 @@ impl App {
                 self.ed.changed();
             }
         } else if !sel.is_empty() {
-            ui.heading("Selection");
-            ui.label(format!("{} part(s), {} wire(s), {} text(s)", sel.comps.len(), sel.wires.len(), sel.texts.len()));
+            ui.heading(tr("Selection"));
+            ui.label(trf("{} part(s), {} wire(s), {} text(s)", &[&sel.comps.len(), &sel.wires.len(), &sel.texts.len()]));
         } else {
-            ui.heading("Properties");
-            ui.weak("Select a part to edit it. Double-click jumps to its value.");
+            ui.heading(tr("Properties"));
+            ui.weak(para(ui, "Select a part to edit it. Double-click jumps to its value."));
         }
         ui.add_space(12.0);
         ui.separator();
@@ -740,52 +811,51 @@ impl App {
 
     fn comp_props(&mut self, ui: &mut egui::Ui, i: usize, focus: bool) {
         let c = self.ed.sch.comps[i].clone();
-        ui.heading(c.kind.title());
+        ui.heading(tr(c.kind.title()));
         let mut changed: Option<Component> = None;
         egui::Grid::new("props").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
             if !c.kind.prefix().is_empty() {
-                ui.label("Name");
-                let mut n = c.name.clone();
-                let r = ui.text_edit_singleline(&mut n);
-                if r.changed() {
-                    changed = Some(Component { name: n, ..c.clone() });
-                }
-                ui.end_row();
+                i18n::form_row(ui, tr("Name"), |ui| {
+                    let mut n = c.name.clone();
+                    if bidi::line(ui, &mut n, Base::Auto, |t| t).changed() {
+                        changed = Some(Component { name: n, ..c.clone() });
+                    }
+                });
             }
             if c.kind != Kind::Ground {
-                ui.label(if c.kind == Kind::Label { "Net name" } else { "Value" });
-                let mut v = c.value.clone();
-                let r = ui.add(egui::TextEdit::singleline(&mut v).desired_width(180.0));
-                if focus {
-                    r.request_focus();
-                }
-                if r.changed() {
-                    changed = Some(Component { value: v, ..changed.clone().unwrap_or(c.clone()) });
-                }
-                ui.end_row();
+                i18n::form_row(ui, if c.kind == Kind::Label { tr("Net name") } else { tr("Value") }, |ui| {
+                    let mut v = c.value.clone();
+                    let r = bidi::line(ui, &mut v, Base::Auto, |t| t.desired_width(180.0));
+                    if focus {
+                        r.request_focus();
+                    }
+                    if r.changed() {
+                        changed = Some(Component { value: v, ..changed.clone().unwrap_or(c.clone()) });
+                    }
+                });
             }
             let kinds = c.kind.model_kinds();
             if !kinds.is_empty() {
-                ui.label("Model");
-                let mut names = swiftsim::netlist::builtin_names(kinds);
-                for t in &self.ed.sch.texts {
-                    for l in t.text.lines() {
-                        let w: Vec<String> = tokenize(&l.to_ascii_lowercase());
-                        if w.first().is_some_and(|f| f == ".model") && w.len() > 2 && kinds.contains(&w[2].as_str()) {
-                            names.insert(0, l.split_whitespace().nth(1).unwrap_or("").to_string());
+                i18n::form_row(ui, tr("Model"), |ui| {
+                    let mut names = swiftsim::netlist::builtin_names(kinds);
+                    for t in &self.ed.sch.texts {
+                        for l in t.text.lines() {
+                            let w: Vec<String> = tokenize(&l.to_ascii_lowercase());
+                            if w.first().is_some_and(|f| f == ".model") && w.len() > 2 && kinds.contains(&w[2].as_str()) {
+                                names.insert(0, l.split_whitespace().nth(1).unwrap_or("").to_string());
+                            }
                         }
                     }
-                }
-                let cur = c.value.split_whitespace().next().unwrap_or("").to_string();
-                egui::ComboBox::from_id_salt("model").selected_text(&cur).width(180.0).show_ui(ui, |ui| {
-                    for n in names {
-                        if ui.selectable_label(n.eq_ignore_ascii_case(&cur), &n).clicked() {
-                            let rest: Vec<&str> = c.value.split_whitespace().skip(1).collect();
-                            changed = Some(Component { value: [vec![n.as_str()], rest].concat().join(" "), ..c.clone() });
+                    let cur = c.value.split_whitespace().next().unwrap_or("").to_string();
+                    egui::ComboBox::from_id_salt("model").selected_text(&cur).width(180.0).show_ui(ui, |ui| {
+                        for n in names {
+                            if ui.selectable_label(n.eq_ignore_ascii_case(&cur), &n).clicked() {
+                                let rest: Vec<&str> = c.value.split_whitespace().skip(1).collect();
+                                changed = Some(Component { value: [vec![n.as_str()], rest].concat().join(" "), ..c.clone() });
+                            }
                         }
-                    }
+                    });
                 });
-                ui.end_row();
             }
         });
         if matches!(c.kind, Kind::Voltage | Kind::Current) {
@@ -795,20 +865,20 @@ impl App {
             }
         }
         if matches!(c.kind, Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4) {
-            ui.weak("Level-1 models accept W=… L=… after the model name.");
+            ui.weak(para(ui, "Level-1 models accept W=… L=… after the model name."));
         }
         if c.kind == Kind::Behavioral {
-            ui.weak("e.g. V=V(a)*V(b)  or  I=if(V(in)>1, 1m, 0)");
+            ui.weak(tr("e.g. V=V(a)*V(b)  or  I=if(V(in)>1, 1m, 0)"));
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.button("Rotate").clicked() {
+            if ui.button(tr("Rotate")).clicked() {
                 self.ed.rotate();
             }
-            if ui.button("Mirror").clicked() {
+            if ui.button(tr("Mirror")).clicked() {
                 self.ed.mirror();
             }
-            if ui.button("Delete").clicked() {
+            if ui.button(tr("Delete")).clicked() {
                 self.ed.delete_selected();
             }
         });
@@ -822,7 +892,7 @@ impl App {
     }
 
     fn sim_card(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Simulation");
+        ui.heading(tr("Simulation"));
         let (ti, line) = self
             .ed
             .sch
@@ -833,46 +903,46 @@ impl App {
             .unwrap_or((None, String::new()));
         let mut f = SimForm::parse(&line);
         let before = f.clone();
-        egui::ComboBox::from_id_salt("an").selected_text(SimForm::KINDS[f.kind]).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("an").selected_text(tr(SimForm::KINDS[f.kind])).show_ui(ui, |ui| {
             for (i, k) in SimForm::KINDS.iter().enumerate() {
-                ui.selectable_value(&mut f.kind, i, *k);
+                ui.selectable_value(&mut f.kind, i, tr(*k));
             }
         });
         egui::Grid::new("simf").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-            let field = |ui: &mut egui::Ui, l: &str, v: &mut String| {
-                ui.label(l);
-                ui.add(egui::TextEdit::singleline(v).desired_width(120.0));
-                ui.end_row();
+            let field = |ui: &mut egui::Ui, l: &'static str, v: &mut String| {
+                i18n::form_row(ui, tr(l), |ui| {
+                    ui.add(egui::TextEdit::singleline(v).desired_width(120.0));
+                });
             };
             match f.kind {
                 0 => {
                     field(ui, "Stop time", &mut f.a);
                     field(ui, "Start saving", &mut f.b);
                     field(ui, "Max step", &mut f.c);
-                    ui.label("Start from");
-                    ui.checkbox(&mut f.uic, "initial conditions (UIC)");
-                    ui.end_row();
+                    i18n::form_row(ui, tr("Start from"), |ui| {
+                        ui.checkbox(&mut f.uic, tr("initial conditions (UIC)"));
+                    });
                 }
                 1 | 5 => {
                     if f.kind == 5 {
                         field(ui, "Output", &mut f.out);
                         field(ui, "Input source", &mut f.src);
                     }
-                    ui.label("Sweep");
-                    egui::ComboBox::from_id_salt("acs").selected_text(&f.d).show_ui(ui, |ui| {
-                        for s in ["dec", "oct", "lin"] {
-                            ui.selectable_value(&mut f.d, s.to_string(), s);
-                        }
+                    i18n::form_row(ui, tr("Sweep"), |ui| {
+                        egui::ComboBox::from_id_salt("acs").selected_text(&f.d).show_ui(ui, |ui| {
+                            for s in ["dec", "oct", "lin"] {
+                                ui.selectable_value(&mut f.d, s.to_string(), s);
+                            }
+                        });
                     });
-                    ui.end_row();
                     field(ui, if f.d == "lin" { "Points" } else { "Points/decade" }, &mut f.a);
                     field(ui, "Start freq", &mut f.b);
                     field(ui, "Stop freq", &mut f.c);
                 }
                 2 => {
                     field(ui, "Source", &mut f.d);
-                    field(ui, "Start", &mut f.a);
-                    field(ui, "Stop", &mut f.b);
+                    field(ui, "Start value", &mut f.a);
+                    field(ui, "Stop value", &mut f.b);
                     field(ui, "Step", &mut f.c);
                 }
                 4 => {
@@ -883,13 +953,13 @@ impl App {
             }
         });
         if f.kind == 3 {
-            ui.weak("DC operating point: voltages appear on the schematic.");
+            ui.weak(para(ui, "DC operating point: voltages appear on the schematic."));
         }
         if f.kind == 4 {
-            ui.weak("Small-signal gain, input and output impedance; results in the Log.");
+            ui.weak(para(ui, "Small-signal gain, input and output impedance; results in the Log."));
         }
         if f.kind == 5 {
-            ui.weak("V(onoise), V(inoise) and each part's contribution in V/√Hz; integrated totals in the Log.");
+            ui.weak(para(ui, "V(onoise), V(inoise) and each part's contribution in V/√Hz; integrated totals in the Log."));
         }
         if f.kind != before.kind {
             let src = self.ed.sch.comps.iter().find(|c| c.kind == Kind::Voltage).map_or("V1".to_string(), |c| c.spice_name());
@@ -908,37 +978,37 @@ impl App {
             self.ed.changed();
         }
         ui.add_space(6.0);
-        ui.weak("Add .step, .meas, .param, .model … with the .Text tool.");
+        ui.weak(para(ui, "Add .step, .meas, .param, .model … with the .Text tool."));
     }
 
     fn bottom(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.tab, Tab::Waves, "Waveforms");
+        i18n::mirrored(ui, |ui| ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.tab, Tab::Waves, tr("Waveforms"));
             if self.mode == Mode::Schematic {
-                ui.selectable_value(&mut self.tab, Tab::Netlist, "Netlist");
+                ui.selectable_value(&mut self.tab, Tab::Netlist, tr("Netlist"));
             }
             let errs = self.log.iter().any(|l| l.starts_with("error"));
-            ui.selectable_value(&mut self.tab, Tab::Log, if errs { RichText::new("Log ●").color(Color32::from_rgb(255, 99, 99)) } else { RichText::new("Log") });
-        });
+            ui.selectable_value(&mut self.tab, Tab::Log, if errs { RichText::new(i18n::with_symbol("●", tr("Log"))).color(Color32::from_rgb(255, 99, 99)) } else { RichText::new(tr("Log")) });
+        }));
         ui.separator();
         match self.tab {
             Tab::Waves => self.waves.ui(ui, self.results.as_ref()),
             Tab::Netlist => {
                 let mut t = self.ed.netlist().text.clone();
                 ui.horizontal(|ui| {
-                    if ui.button("Copy").clicked() {
+                    if ui.button(tr("Copy")).clicked() {
                         ui.ctx().copy_text(t.clone());
                     }
-                    ui.weak("Generated from the schematic (read-only).");
+                    ui.weak(tr("Generated from the schematic (read-only)."));
                 });
                 egui::ScrollArea::both().show(ui, |ui| {
-                    ui.add(egui::TextEdit::multiline(&mut t).code_editor().interactive(false).desired_width(f32::INFINITY));
+                    bidi::code(ui, &mut t, |e| e.interactive(false).desired_width(f32::INFINITY));
                 });
             }
             Tab::Log => {
                 egui::ScrollArea::both().stick_to_bottom(true).show(ui, |ui| {
                     if self.log.is_empty() {
-                        ui.weak("No messages.");
+                        ui.weak(tr("No messages."));
                     }
                     for l in &self.log {
                         let col = if l.starts_with("error") {
@@ -968,7 +1038,7 @@ impl eframe::App for App {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        let set = Settings { dark: self.dark, show_op: self.ed.show_op, last_dir: self.last_dir.clone(), check_updates: self.check_updates };
+        let set = Settings { dark: self.dark, show_op: self.ed.show_op, last_dir: self.last_dir.clone(), check_updates: self.check_updates, lang: self.lang.clone() };
         eframe::set_value(storage, eframe::APP_KEY, &set);
     }
 
@@ -992,7 +1062,38 @@ impl App {
         });
         self.update_rx = Some((rx, manual));
         if manual {
-            self.status = "Checking for updates…".into();
+            self.status = tr("Checking for updates…").into();
+        }
+    }
+
+    /// Downloads and installs the update in the background.
+    fn start_install(&mut self, ctx: &egui::Context, tag: String, asset: update::Asset, target: PathBuf) {
+        let progress = Arc::new(AtomicU32::new(0));
+        let (tx, rx) = channel();
+        let (p, ctx) = (progress.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(update::install(&tag, &asset, &target, &p).map(|()| (tag, target)));
+            ctx.request_repaint();
+        });
+        self.install = Some((progress, rx));
+    }
+
+    fn poll_install(&mut self, ctx: &egui::Context) {
+        let Some((_, rx)) = &self.install else { return };
+        ctx.request_repaint_after(Duration::from_millis(100));
+        let r = match rx.try_recv() {
+            Ok(r) => r,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("the update stopped unexpectedly".into()),
+        };
+        self.install = None;
+        match r {
+            Ok(done) => {
+                self.update = None;
+                self.status = trf("SwiftSim {} is installed.", &[&done.0]);
+                self.restart = Some(done);
+            }
+            Err(e) => self.status = trf("Update failed: {}", &[&e]),
         }
     }
 
@@ -1007,11 +1108,12 @@ impl App {
         self.update_rx = None;
         match r {
             Ok(Some(rel)) => {
-                self.status = format!("SwiftSim {} is available (you have {}).", rel.tag, update::VERSION);
+                self.status = trf("SwiftSim {} is available (you have {}).", &[&rel.tag, &update::VERSION]);
+                self.update_plan = update::plan(&rel);
                 self.update = Some(rel);
             }
-            Ok(None) if manual => self.status = format!("SwiftSim {} is up to date.", update::VERSION),
-            Err(e) if manual => self.status = format!("Couldn't check for updates: {e}"),
+            Ok(None) if manual => self.status = trf("SwiftSim {} is up to date.", &[&update::VERSION]),
+            Err(e) if manual => self.status = trf("Couldn't check for updates: {}", &[&e]),
             _ => {}
         }
     }
@@ -1020,6 +1122,7 @@ impl App {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
         self.poll_update();
+        self.poll_install(&ctx);
         if !self.dirty() {
             self.rec.remove();
         } else {
@@ -1054,7 +1157,7 @@ impl App {
             self.waves.add(&sig);
             self.tab = Tab::Waves;
         }
-        let name = self.path.as_ref().and_then(|p| p.file_name()).map_or("untitled".into(), |n| n.to_string_lossy().to_string());
+        let name = self.path.as_ref().and_then(|p| p.file_name()).map_or(tr("untitled").into(), |n| n.to_string_lossy().to_string());
         let title = format!("{}{name} — SwiftSim", if self.dirty() { "● " } else { "" });
         if title != self.title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -1063,23 +1166,36 @@ impl App {
 
         egui::Panel::top("menu").show(ui, |ui| {
             self.menu(ui);
+            i18n::mirrored(ui, |ui| {
             self.toolbar(ui);
             if let Some(rel) = self.update.clone() {
                 ui.horizontal(|ui| {
-                    ui.colored_label(Color32::from_rgb(102, 220, 120), format!("Update available: SwiftSim {} (you have {})", rel.tag, update::VERSION));
-                    if ui.button("View release").clicked() {
+                    ui.colored_label(Color32::from_rgb(102, 220, 120), trf("Update available: SwiftSim {} (you have {})", &[&rel.tag, &update::VERSION]));
+                    if let Some((p, _)) = &self.install {
+                        ui.add(egui::ProgressBar::new(p.load(Ordering::Relaxed) as f32 / 1000.0).desired_width(200.0).show_percentage());
+                        return;
+                    }
+                    if let Some((asset, target)) = self.update_plan.clone() {
+                        if ui.button(tr("Install update")).clicked() {
+                            self.start_install(ui.ctx(), rel.tag.clone(), asset, target);
+                        }
+                    }
+                    if ui.button(tr("View release")).clicked() {
                         ui.ctx().open_url(egui::OpenUrl::new_tab(&rel.url));
                     }
-                    if ui.button("Dismiss").clicked() {
+                    if ui.button(tr("Dismiss")).clicked() {
                         self.update = None;
                     }
                 });
             }
+            });
             ui.add_space(2.0);
         });
         egui::Panel::bottom("status").exact_size(22.0).show(ui, |ui| {
-            ui.horizontal_centered(|ui| {
-                ui.small(&self.status);
+            i18n::mirrored(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.small(&self.status);
+                });
             });
         });
         egui::Panel::bottom("results").resizable(true).default_size(300.0).min_size(120.0).show(ui, |ui| {
@@ -1089,9 +1205,11 @@ impl App {
             self.bottom(&mut ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::top_down(egui::Align::Min))));
         });
         if self.mode == Mode::Schematic {
-            egui::Panel::left("palette").resizable(true).default_size(200.0).min_size(150.0).show(ui, |ui| self.palette(ui));
-            egui::Panel::right("props").resizable(true).default_size(280.0).min_size(220.0).show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.properties(ui));
+            // the parts list is on the reading side
+            let (parts, props) = if i18n::is_rtl_ui() { (egui::Panel::right("palette"), egui::Panel::left("props")) } else { (egui::Panel::left("palette"), egui::Panel::right("props")) };
+            parts.resizable(true).default_size(200.0).min_size(150.0).show(ui, |ui| i18n::mirrored(ui, |ui| self.palette(ui)));
+            props.resizable(true).default_size(280.0).min_size(220.0).show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| i18n::mirrored(ui, |ui| self.properties(ui)));
             });
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| match self.mode {
@@ -1099,7 +1217,7 @@ impl App {
             Mode::Netlist => {
                 egui::Frame::central_panel(ui.style()).show(ui, |ui| {
                     egui::ScrollArea::both().show(ui, |ui| {
-                        let r = ui.add(egui::TextEdit::multiline(&mut self.net_text).code_editor().desired_width(f32::INFINITY).desired_rows(40));
+                        let r = bidi::code(ui, &mut self.net_text, |e| e.desired_width(f32::INFINITY).desired_rows(40));
                         if r.changed() {
                             self.net_dirty = true;
                         }
@@ -1110,28 +1228,28 @@ impl App {
 
         if let Some((f, s)) = &self.recover {
             let mut answer = None;
-            egui::Modal::new(egui::Id::unique("recover")).show(&ctx, |ui| {
-                ui.heading("Recover unsaved work?");
-                ui.label("SwiftSim closed without saving last time. A recovery copy of the unsaved document was found:");
-                ui.monospace(s.path.as_ref().map_or("untitled".into(), |p| p.display().to_string()));
-                ui.weak("Restoring opens it with unsaved changes; your file on disk stays as it was until you save.");
+            egui::Modal::new(egui::Id::unique("recover")).show(&ctx, |ui| i18n::mirrored(ui, |ui| {
+                ui.heading(tr("Recover unsaved work?"));
+                ui.label(para(ui, "SwiftSim closed without saving last time. A recovery copy of the unsaved document was found:"));
+                ui.monospace(s.path.as_ref().map_or(tr("untitled").into(), |p| p.display().to_string()));
+                ui.weak(para(ui, "Restoring opens it with unsaved changes; your file on disk stays as it was until you save."));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Restore").clicked() {
+                    if ui.button(tr("Restore")).clicked() {
                         answer = Some(true);
                     }
-                    if ui.button("Discard").clicked() {
+                    if ui.button(tr("Discard")).clicked() {
                         answer = Some(false);
                     }
                 });
-            });
+            }));
             match answer {
                 Some(true) => {
                     let f = f.clone();
                     self.recover = None;
                     match self.rec.adopt(&f) {
                         Ok(s) => self.restore(s),
-                        Err(e) => self.status = format!("Cannot restore {}: {e}", f.display()),
+                        Err(e) => self.status = trf("Cannot restore {}: {}", &[&f.display(), &e]),
                     }
                 }
                 Some(false) => {
@@ -1142,31 +1260,54 @@ impl App {
             }
         }
 
-        if let Some(p) = self.confirm.clone() {
-            let mut close = false;
-            egui::Modal::new(egui::Id::unique("confirm")).show(&ctx, |ui| {
-                ui.heading("Unsaved changes");
-                ui.label("Discard changes to the current document?");
+        if let Some((tag, exe)) = self.restart.clone() {
+            let mut answer = None;
+            egui::Modal::new(egui::Id::unique("restart")).show(&ctx, |ui| i18n::mirrored(ui, |ui| {
+                ui.heading(tr("Update installed"));
+                ui.label(trf("SwiftSim {} is installed. Restart now to start using it?", &[&tag]));
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
+                    if ui.button(tr("Restart now")).clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button(tr("Later")).clicked() {
+                        answer = Some(false);
+                    }
+                });
+            }));
+            if let Some(now) = answer {
+                self.restart = None;
+                if now {
+                    self.request(Pending::Restart(exe), &ctx);
+                }
+            }
+        }
+
+        if let Some(p) = self.confirm.clone() {
+            let mut close = false;
+            egui::Modal::new(egui::Id::unique("confirm")).show(&ctx, |ui| i18n::mirrored(ui, |ui| {
+                ui.heading(tr("Unsaved changes"));
+                ui.label(tr("Discard changes to the current document?"));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr("Save")).clicked() {
                         self.save(false);
                         close = true;
                         if !self.dirty() {
                             self.do_pending(p.clone(), &ctx);
                         }
                     }
-                    if ui.button("Discard").clicked() {
+                    if ui.button(tr("Discard")).clicked() {
                         close = true;
                         self.ed.dirty = false;
                         self.net_dirty = false;
                         self.do_pending(p, &ctx);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr("Cancel")).clicked() {
                         close = true;
                     }
                 });
-            });
+            }));
             if close {
                 self.confirm = None;
             }
@@ -1175,10 +1316,10 @@ impl App {
 }
 
 /// Netlist of a saved schematic (`.sws`), for batch mode.
-pub fn sws_netlist(text: &str) -> Result<String, String> {
+pub fn sws_netlist(text: &str) -> Result<(String, Vec<String>), String> {
     let mut s: Schematic = serde_json::from_str(text).map_err(|e| format!("not a SwiftSim schematic: {e}"))?;
     s.upgrade();
-    Ok(s.netlist().text)
+    Ok((s.netlist().text, s.name_conflicts()))
 }
 
 /// Settings folder: `%APPDATA%\SwiftSim` or `$XDG_CONFIG_HOME`/`~/.config/swiftsim` (temp folder as a last resort).
@@ -1193,6 +1334,15 @@ fn config_dir() -> PathBuf {
 /// Saved LTspice library folder.
 fn lib_setting() -> Option<PathBuf> {
     Some(config_dir().join("ltspice-lib.txt"))
+}
+
+/// Menu entry with its shortcut at the right edge.
+fn item(ui: &mut egui::Ui, label: &str, shortcut: &str) -> egui::Response {
+    if i18n::is_rtl_ui() {
+        ui.add(egui::Button::new((RichText::new(shortcut).weak(), egui::Atom::grow(), label)))
+    } else {
+        ui.add(egui::Button::new(label).shortcut_text(shortcut))
+    }
 }
 
 fn is_analysis(l: &str) -> bool {
@@ -1328,10 +1478,10 @@ fn source_form(ui: &mut egui::Ui, value: &str, volt: bool) -> Option<String> {
     }
     let (f0, a0, d0, ac0) = (func.clone(), args.clone(), dc.clone(), ac.clone());
     let unit = if volt { "V" } else { "A" };
-    ui.label(RichText::new("Waveform").strong());
+    ui.label(RichText::new(tr("Waveform")).strong());
     ui.horizontal(|ui| {
         for (k, l) in [("dc", "DC"), ("pulse", "Pulse"), ("sine", "Sine"), ("exp", "Exp"), ("pwl", "PWL")] {
-            ui.selectable_value(&mut func, k.to_string(), l);
+            ui.selectable_value(&mut func, k.to_string(), tr(l));
         }
     });
     egui::Grid::new("srcf").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
@@ -1342,33 +1492,33 @@ fn source_form(ui: &mut egui::Ui, value: &str, volt: bool) -> Option<String> {
             _ => &[],
         };
         if func == "dc" {
-            ui.label(format!("DC value ({unit})"));
-            ui.text_edit_singleline(&mut dc);
-            ui.end_row();
+            i18n::form_row(ui, &trf("DC value ({})", &[&unit]), |ui| {
+                ui.text_edit_singleline(&mut dc);
+            });
         } else if func == "pwl" {
-            ui.label("t1 v1 t2 v2 …");
-            let mut s = args.join(" ");
-            if ui.text_edit_singleline(&mut s).changed() {
-                args = s.split_whitespace().map(|x| x.to_string()).collect();
-            }
-            ui.end_row();
+            i18n::form_row(ui, "t1 v1 t2 v2 …", |ui| {
+                let mut s = args.join(" ");
+                if ui.text_edit_singleline(&mut s).changed() {
+                    args = s.split_whitespace().map(|x| x.to_string()).collect();
+                }
+            });
         } else {
             args.resize(args.len().max(labels.len().min(3)), String::new());
             for (k, l) in labels.iter().enumerate() {
-                ui.label(*l);
-                let mut v = args.get(k).cloned().unwrap_or_default();
-                if ui.text_edit_singleline(&mut v).changed() {
-                    if args.len() <= k {
-                        args.resize(k + 1, String::new());
+                i18n::form_row(ui, tr(*l), |ui| {
+                    let mut v = args.get(k).cloned().unwrap_or_default();
+                    if ui.text_edit_singleline(&mut v).changed() {
+                        if args.len() <= k {
+                            args.resize(k + 1, String::new());
+                        }
+                        args[k] = v;
                     }
-                    args[k] = v;
-                }
-                ui.end_row();
+                });
             }
         }
-        ui.label("AC amplitude");
-        ui.text_edit_singleline(&mut ac);
-        ui.end_row();
+        i18n::form_row(ui, tr("AC amplitude"), |ui| {
+            ui.text_edit_singleline(&mut ac);
+        });
     });
     if (&func, &args, &dc, &ac) == (&f0, &a0, &d0, &ac0) {
         return None;

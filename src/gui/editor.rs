@@ -802,7 +802,7 @@ impl Editor {
         for (i, t) in self.sch.texts.iter().enumerate() {
             let col = if self.sel.texts.contains(&i) { p.sel } else { p.dir };
             let s = self.to_screen(rect, [t.pos[0] as f32, t.pos[1] as f32]);
-            let g = painter.layout_no_wrap(t.text.clone(), mono.clone(), col);
+            let g = painter.layout_no_wrap(super::bidi::display(&t.text, super::bidi::Base::Ltr), mono.clone(), col);
             let r = Rect::from_min_size(s, g.size());
             painter.galley(s, g, col);
             self.text_rects.push(r);
@@ -813,7 +813,7 @@ impl Editor {
             let small = FontId::proportional((z * 0.65).clamp(8.0, 16.0));
             for w in &self.sch.wires {
                 let Some(n) = nl_nets.get(&w.a) else { continue };
-                let key = n.to_ascii_lowercase();
+                let key = swiftsim::expr::fold(n);
                 if key == "0" || !shown.insert(key.clone()) {
                     continue;
                 }
@@ -864,7 +864,7 @@ impl Editor {
         }
         if c.kind == Kind::Label {
             let s = tf([0.0, 0.0]);
-            let g = painter.layout_no_wrap(c.value.clone(), font.clone(), col);
+            let g = painter.layout_no_wrap(super::bidi::display(&c.value, super::bidi::Base::Auto), font.clone(), col);
             let r = Rect::from_min_size(s + Vec2::new(4.0, -g.size().y - 2.0), g.size() + Vec2::new(6.0, 2.0));
             painter.rect_stroke(r, CornerRadius::same(3), Stroke::new(1.0, col), StrokeKind::Middle);
             painter.galley(r.min + Vec2::new(3.0, 1.0), g, col);

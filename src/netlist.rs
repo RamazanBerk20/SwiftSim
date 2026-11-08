@@ -87,6 +87,13 @@ pub struct Deck {
     pub warnings: Vec<String>,
     /// `.lib`/`.include` files skipped because they are vendor-encrypted.
     pub encrypted: Vec<String>,
+    /// Names as first written, by their `expr::fold` key: results show non-ASCII ones this way.
+    pub spelling: HashMap<String, String>,
+}
+
+/// Name-like parts of a card, with the separators around them dropped.
+fn name_parts(s: &str) -> impl Iterator<Item = &str> {
+    s.split(|c: char| c.is_whitespace() || "(),={}:.'\"".contains(c)).filter(|w| !w.is_empty())
 }
 
 /// SiO2 permittivity, F/m (3.9·ε0, as ngspice's noise models).
@@ -204,7 +211,7 @@ fn ltspice_models(lib: &Path) -> &'static HashMap<String, Model> {
         }
     }
     let (raw, mut lines) = (text.lines().collect::<Vec<_>>(), vec![]);
-    let _ = read_lines(&raw, 0, None, &mut lines, &mut vec![], &mut vec![], 0);
+    let _ = read_lines(&raw, 0, None, &mut lines, &mut Deck::default(), 0);
     let mut models: HashMap<String, Model> = lines.iter().filter_map(|l| parse_model(&l.text).ok()).collect();
     resolve_ako(&mut models);
     // leaked on purpose: one small map per library folder used in this process
@@ -437,9 +444,42 @@ impl Deck {
             }
         }
         let mut lines = vec![];
-        read_lines(&raw[start..], start, base, &mut lines, &mut d.warnings, &mut d.encrypted, 0)?;
+        read_lines(&raw[start..], start, base, &mut lines, &mut d, 0)?;
         d.classify(lines)?;
         Ok(d)
+    }
+
+    /// Remembers how a card spells its non-ASCII names, and warns when two different words end up as one name.
+    fn note_spelling(&mut self, no: usize, card: &str) {
+        // an ASCII name matters only if it has an i, the one letter `kir` can share with `kır`
+        for w in name_parts(card).filter(|w| !w.is_ascii() || w.contains(['i', 'I'])) {
+            let key = crate::expr::fold(w);
+            match self.spelling.get(&key) {
+                None => {
+                    self.spelling.insert(key, w.to_string());
+                }
+                Some(first) if !(first.is_ascii() && w.is_ascii()) && crate::expr::distinct_spellings(first, w) => {
+                    let msg = format!("line {no}: '{first}' and '{w}' are the same name here (names ignore case, and ı and İ count as i)");
+                    if !self.warnings.contains(&msg) {
+                        self.warnings.push(msg);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// `s` with every non-ASCII name back in the spelling the netlist used.
+    pub fn spelled(&self, s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut rest = s;
+        for w in name_parts(s) {
+            let at = rest.find(w).unwrap_or(0);
+            out.push_str(&rest[..at]);
+            out.push_str(self.spelling.get(w).filter(|o| !o.is_ascii()).map_or(w, |o| o.as_str()));
+            rest = &rest[at + w.len()..];
+        }
+        out + rest
     }
 
     fn classify(&mut self, lines: Vec<Line>) -> Result<(), String> {
@@ -985,7 +1025,7 @@ impl Deck {
     }
 }
 
-fn read_lines(raw: &[&str], offset: usize, base: Option<&Path>, out: &mut Vec<Line>, warn: &mut Vec<String>, enc: &mut Vec<String>, depth: usize) -> Result<(), String> {
+fn read_lines(raw: &[&str], offset: usize, base: Option<&Path>, out: &mut Vec<Line>, deck: &mut Deck, depth: usize) -> Result<(), String> {
     if depth > 10 {
         return Err("includes nested too deeply".into());
     }
@@ -1001,11 +1041,13 @@ fn read_lines(raw: &[&str], offset: usize, base: Option<&Path>, out: &mut Vec<Li
         if let Some(rest) = t.strip_prefix('+') {
             if let Some(last) = out.last_mut() {
                 last.text.push(' ');
-                last.text.push_str(&rest.to_ascii_lowercase());
+                last.text.push_str(&crate::expr::fold(rest));
+                deck.note_spelling(no, rest);
             }
             continue;
         }
-        let low = t.to_ascii_lowercase();
+        let low = crate::expr::fold(t);
+        deck.note_spelling(no, t);
         let word = low.split_whitespace().next().unwrap_or("");
         if matches!(word, ".include" | ".inc" | ".lib") {
             let arg = t[word.len()..].trim();
@@ -1026,12 +1068,12 @@ fn read_lines(raw: &[&str], offset: usize, base: Option<&Path>, out: &mut Vec<Li
                 tries.extend(["sub", "cmp", ""].map(|d| lt.join(d).join(&rel)));
             }
             let Some((text, p)) = tries.into_iter().find_map(|p| Some((decode(&std::fs::read(&p).ok()?), p))) else {
-                warn.push(format!("line {no}: library '{path}' not found, ignored (built-in models are still available)"));
+                deck.warnings.push(format!("line {no}: library '{path}' not found, ignored (built-in models are still available)"));
                 continue;
             };
             if is_encrypted(&text) {
-                warn.push(format!("line {no}: library '{path}' is vendor-encrypted; SwiftSim cannot read encrypted models, so parts using it will fail"));
-                enc.push(format!("'{path}'"));
+                deck.warnings.push(format!("line {no}: library '{path}' is vendor-encrypted; SwiftSim cannot read encrypted models, so parts using it will fail"));
+                deck.encrypted.push(format!("'{path}'"));
                 continue;
             }
             let lines: Vec<&str> = text.lines().collect();
@@ -1055,7 +1097,7 @@ fn read_lines(raw: &[&str], offset: usize, base: Option<&Path>, out: &mut Vec<Li
                     })
                     .collect()
             };
-            read_lines(&pick, 0, p.parent(), out, warn, enc, depth + 1)?;
+            read_lines(&pick, 0, p.parent(), out, deck, depth + 1)?;
             continue;
         }
         if low == ".end" {

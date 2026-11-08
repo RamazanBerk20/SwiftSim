@@ -39,7 +39,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path target/release/swiftsim.exe, packaging/windows/register-sws.cmd, LICENSE-MIT, LICENSE-APACHE, README.md -DestinationPath dist/swiftsim-windows-x86_64.zip
+          Compress-Archive -Path target/release/swiftsim.exe, packaging/windows/register-sws.cmd, LICENSE-MIT, LICENSE-APACHE, LICENSE-OFL, README.md -DestinationPath dist/swiftsim-windows-x86_64.zip
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging/windows/swiftsim.iss
 
       - uses: actions/upload-artifact@v7

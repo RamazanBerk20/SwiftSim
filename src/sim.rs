@@ -70,8 +70,8 @@ pub struct Plot {
 
 impl Plot {
     pub fn index(&self, name: &str) -> Option<usize> {
-        let n = name.to_ascii_lowercase();
-        self.names.iter().position(|s| *s == n)
+        let n = crate::expr::fold(name);
+        self.names.iter().position(|s| if s.is_ascii() { *s == n } else { crate::expr::fold(s) == n })
     }
 }
 
@@ -162,6 +162,9 @@ pub fn run(deck: &Deck, ctl: &Control) -> Result<SimResult, String> {
         let at = if step.is_empty() { String::new() } else { format!("   [{step}]") };
         res.log.push(format!("{name}: {}{at}", fmt_si(*v)));
     }
+    res.plots.iter_mut().flat_map(|p| &mut p.names).for_each(|n| *n = deck.spelled(n));
+    res.log.iter_mut().filter(|l| !l.starts_with("warning")).for_each(|l| *l = deck.spelled(l));
+    res.meas.iter_mut().for_each(|m| m.1 = deck.spelled(&m.1));
     let pts: usize = res.plots.iter().map(|p| p.x.len()).sum();
     res.log.push(format!("Simulation done in {:.3} s ({} points, {} run(s))", t0.elapsed().as_secs_f64(), pts, total));
     ctl.progress.store(1000, Ordering::Relaxed);

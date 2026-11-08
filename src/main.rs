@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod gui;
+mod mcp;
 
 use std::path::Path;
 
@@ -24,8 +25,11 @@ fn main() {
         let out = args.iter().position(|a| a == "-o").and_then(|j| args.get(j + 1));
         std::process::exit(batch(file, out.map(|s| s.as_str()), args.iter().any(|a| a == "--netlist")));
     }
+    if args.iter().any(|a| a == "--mcp") {
+        return mcp::serve();
+    }
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        println!("SwiftSim {}\n\nusage:\n  swiftsim [file.sws|file.cir]      open the GUI\n  swiftsim -b <file> [-o out.csv]    batch simulation of a .cir/.net, .sws or .asc file\n      --netlist                      also print the netlist that is simulated", gui::update::VERSION);
+        println!("SwiftSim {}\n\nusage:\n  swiftsim [file.sws|file.cir]      open the GUI\n  swiftsim -b <file> [-o out.csv]    batch simulation of a .cir/.net, .sws or .asc file\n      --netlist                      also print the netlist that is simulated\n  swiftsim --mcp                     MCP server on stdio, for coding agents", gui::update::VERSION);
         return;
     }
     if let Err(e) = gui::run(args.get(1).cloned()) {
@@ -34,29 +38,35 @@ fn main() {
     }
 }
 
-fn batch(file: &str, out: Option<&str>, show_netlist: bool) -> i32 {
+/// Netlist text of a .cir/.net, .sws or .asc file, and any import warnings.
+fn read_circuit(file: &str) -> Result<(String, Vec<String>), String> {
     let lower = file.to_ascii_lowercase();
-    let text = match std::fs::read(file) {
-        Ok(b) if lower.ends_with(".sws") => match gui::sws_netlist(&swiftsim::netlist::decode(&b)) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("{file}: {e}");
-                return 1;
-            }
-        },
-        Ok(b) if lower.ends_with(".asc") => {
-            let (s, skipped) = gui::asc::import(&swiftsim::netlist::decode(&b), Path::new(file).parent());
-            if !skipped.is_empty() {
-                println!("warning: unsupported LTspice symbols left out (their nets are open): {}", skipped.join(", "));
-            }
-            s.netlist().text
+    let bytes = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
+    if lower.ends_with(".sws") {
+        return gui::sws_netlist(&swiftsim::netlist::decode(&bytes)).map_err(|e| format!("{file}: {e}"));
+    }
+    if lower.ends_with(".asc") {
+        let (s, skipped) = gui::asc::import(&swiftsim::netlist::decode(&bytes), Path::new(file).parent());
+        let mut warnings = s.name_conflicts();
+        if !skipped.is_empty() {
+            warnings.push(format!("warning: unsupported LTspice symbols left out (their nets are open): {}", skipped.join(", ")));
         }
-        Ok(b) => swiftsim::netlist::decode(&b),
+        return Ok((s.netlist().text, warnings));
+    }
+    Ok((swiftsim::netlist::decode(&bytes), vec![]))
+}
+
+fn batch(file: &str, out: Option<&str>, show_netlist: bool) -> i32 {
+    let (text, warnings) = match read_circuit(file) {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("{file}: {e}");
+            eprintln!("{e}");
             return 1;
         }
     };
+    for w in &warnings {
+        println!("{w}");
+    }
     if show_netlist {
         println!("{text}");
     }

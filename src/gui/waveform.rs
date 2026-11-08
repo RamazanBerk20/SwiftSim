@@ -1,6 +1,8 @@
 //! Waveform viewer: traces from expressions, stepped runs, Bode plots,
 //! noise spectra (log-log), FFT, two cursors with readout, CSV export.
 
+use super::bidi::{self, Base};
+use super::i18n::{self, tr};
 use eframe::egui;
 use egui::{Color32, RichText};
 use egui_plot::{GridInput, GridMark, HoverPosition, Line, Plot, PlotPoint, PlotPoints, VLine};
@@ -238,19 +240,19 @@ impl WaveView {
     pub fn ui(&mut self, ui: &mut egui::Ui, res: Option<&SimResult>) {
         let kind = res.and_then(|r| r.plots.first()).map(|p| p.kind);
         // toolbar
-        ui.horizontal(|ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut self.input).hint_text("Add trace: V(out), V(a)-V(b), I(R1)*V(out) …").desired_width(260.0));
+        i18n::mirrored(ui, |ui| ui.horizontal(|ui| {
+            let r = bidi::line(ui, &mut self.input, Base::Ltr, |t| t.hint_text(tr("Add trace: V(out), V(a)-V(b), I(R1)*V(out) …")).desired_width(260.0));
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let s = std::mem::take(&mut self.input);
                 self.add(&s);
                 r.request_focus();
             }
-            if ui.button("Add").clicked() {
+            if ui.button(tr("Add")).clicked() {
                 let s = std::mem::take(&mut self.input);
                 self.add(&s);
             }
             if let Some(p) = res.and_then(|r| r.plots.first()) {
-                ui.menu_button("Signals ▾", |ui| {
+                ui.menu_button(format!("{} ▾", tr("Signals")), |ui| {
                     egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                         for n in &p.names {
                             if ui.button(pretty(n)).clicked() {
@@ -264,26 +266,26 @@ impl WaveView {
             if kind == Some(PlotKind::Tran) {
                 ui.toggle_value(&mut self.fft, "FFT");
             }
-            if ui.button("Clear").clicked() {
+            if ui.button(tr("Clear")).clicked() {
                 self.traces.clear();
                 self.c1 = None;
                 self.c2 = None;
             }
             if let Some(r) = res {
-                if ui.button("Export CSV…").clicked() {
+                if ui.button(tr("Export CSV…")).clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name("waveforms.csv").save_file() {
                         let _ = std::fs::write(path, swiftsim::to_csv(&r.plots));
                     }
                 }
             }
-            ui.weak("Left-click: cursor 1 · Right-click: cursor 2 · Drag: pan · Scroll: zoom · Double-click: reset");
-        });
+            ui.weak(tr("Left-click: cursor 1 · Right-click: cursor 2 · Drag: pan · Scroll: zoom · Double-click: reset"));
+        }));
         // trace chips
         let mut remove = None;
         ui.horizontal_wrapped(|ui| {
             for (i, t) in self.traces.iter_mut().enumerate() {
                 let txt = RichText::new(format!("■ {}", t.expr)).color(if t.visible { t.color } else { ui.visuals().weak_text_color() });
-                if ui.selectable_label(false, txt).on_hover_text("Click to show/hide").clicked() {
+                if ui.selectable_label(false, txt).on_hover_text(tr("Click to show/hide")).clicked() {
                     t.visible = !t.visible;
                 }
                 if ui.small_button("×").clicked() {
@@ -298,15 +300,15 @@ impl WaveView {
             ui.colored_label(Color32::from_rgb(255, 100, 100), e);
         }
         let Some(res) = res else {
-            ui.centered_and_justified(|ui| ui.weak("Run a simulation (F5) to see waveforms. Use the probe to click wires and parts."));
+            ui.centered_and_justified(|ui| ui.weak(tr("Run a simulation (F5) to see waveforms. Use the probe to click wires and parts.")));
             return;
         };
         if kind == Some(PlotKind::Op) || kind.is_none() {
-            ui.centered_and_justified(|ui| ui.weak("Operating point results are shown on the schematic and in the Log tab."));
+            ui.centered_and_justified(|ui| ui.weak(tr("Operating point results are shown on the schematic and in the Log tab.")));
             return;
         }
         if self.traces.is_empty() {
-            ui.centered_and_justified(|ui| ui.weak("Pick signals from “Signals ▾”, type an expression above, or probe the schematic (P)."));
+            ui.centered_and_justified(|ui| ui.weak(tr("Pick signals from the Signals menu, type an expression above, or probe the schematic (P).")));
             return;
         }
         let key = format!("{}|{}|{}", self.generation, self.fft, self.traces.iter().map(|t| t.expr.as_str()).collect::<Vec<_>>().join("\u{1}"));
@@ -427,7 +429,7 @@ impl WaveView {
                         ui.strong("Δ");
                     }
                 }
-                close = ui.small_button("× Close").on_hover_text("Remove both cursors (traces stay)").clicked();
+                close = ui.small_button(i18n::with_symbol("×", tr("Close"))).on_hover_text(tr("Remove both cursors (traces stay)")).clicked();
                 ui.end_row();
                 for s in self.series.iter().filter(|s| self.traces[s.trace].visible).take(6) {
                     let t = &self.traces[s.trace];

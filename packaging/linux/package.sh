@@ -9,7 +9,7 @@ rm -rf "$s" && mkdir -p "$s" dist
 t=$s/swiftsim-linux-x86_64
 mkdir -p "$t/icons"
 cp target/release/swiftsim packaging/linux/install.sh packaging/linux/swiftsim.desktop packaging/linux/swiftsim.xml \
-   assets/swiftsim.svg LICENSE-MIT LICENSE-APACHE README.md "$t/"
+   assets/swiftsim.svg LICENSE-MIT LICENSE-APACHE LICENSE-OFL README.md "$t/"
 cp assets/icons/*.png "$t/icons/"
 tar -C "$s" -czf dist/swiftsim-linux-x86_64.tar.gz swiftsim-linux-x86_64
 
