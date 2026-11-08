@@ -115,6 +115,10 @@ On Windows the same commands produce `swiftsim.exe` (no console window in releas
   `I(R1)*V(out)`), FFT, two cursors with Δ and 1/Δ readout, CSV export
 - `.op` voltages annotated on the schematic; Log shows OP tables, `.meas`, warnings
 - Netlist mode: edit and run any SPICE netlist directly (LTSpice `.net/.cir` files)
+- Ten interface languages, with a mirrored layout in Arabic; net labels and text in any script,
+  and color emoji (see [Languages](#languages))
+- *View → Reset layout* returns the panels to their default sizes and leaves the window as it is
+- Updates install from inside the app on Linux and Windows
 - LTspice `.asc` import (File ▸ Open): stock symbols (R, C, L, diodes, sources, BJT, MOSFET,
   JFET, E/G, switch, ideal opamp), plus subcircuit symbols (`Prefix X`: vendor opamps, your
   own `.asy`) read from the `.asy` next to the schematic or in LTspice's `lib/sym`; they

@@ -30,9 +30,12 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: 1 # runners have no FUSE
           ARCH: x86_64
         run: |
-          curl -fsSL --retry 6 --retry-delay 20 --retry-all-errors -o "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          # both fetched here, with retries: appimagetool's own runtime download has none
+          fetch() { curl -fsSL --retry 12 --retry-delay 30 --retry-all-errors -o "$1" "$2"; }
+          fetch "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          fetch "$RUNNER_TEMP/runtime" https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
           chmod +x "$RUNNER_TEMP/appimagetool"
-          packaging/linux/package.sh "$RUNNER_TEMP/appimagetool"
+          packaging/linux/package.sh "$RUNNER_TEMP/appimagetool" "$RUNNER_TEMP/runtime"
 
       - name: Package zip and installer
         if: runner.os == 'Windows'

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds dist/swiftsim-linux-x86_64.tar.gz and dist/SwiftSim-x86_64.AppImage from target/release/swiftsim.
-# Usage: packaging/linux/package.sh path/to/appimagetool
+# Usage: packaging/linux/package.sh path/to/appimagetool [path/to/runtime]
 set -eu
 cd "$(dirname "$0")/../.."
 s=target/linux-package
@@ -20,4 +20,4 @@ cp packaging/linux/swiftsim.desktop "$a/"
 cp assets/icons/256.png "$a/swiftsim.png"
 cp packaging/linux/swiftsim.xml "$a/usr/share/mime/packages/"
 ln -s usr/bin/swiftsim "$a/AppRun"
-"$1" "$a" dist/SwiftSim-x86_64.AppImage
+"$1" ${2:+--runtime-file "$2"} "$a" dist/SwiftSim-x86_64.AppImage
