@@ -566,7 +566,8 @@ mod tests {
 
     #[test]
     fn gui_status_waits_for_a_state() {
-        let win = |path: &str, state: &str, run: u64| json!({"pid": run, "document": {"path": path}, "simulation": {"state": state, "run": run}});
+        // windows report absolute paths; "/a.sws" alone is drive-relative on Windows
+        let win = |path: &str, state: &str, run: u64| json!({"pid": run, "document": {"path": std::path::absolute(path).unwrap()}, "simulation": {"state": state, "run": run}});
         let polls = std::cell::Cell::new(0);
         // the run finishes on the third look
         let windows = || {
