@@ -35,9 +35,9 @@ exists, *Install update* downloads it, replaces the program and offers to restar
 Files shows the administrator prompt). AUR and other package-manager installs update through the
 package manager, and builds from source only link to the release.
 
-Making a release: set `version` in `Cargo.toml`, then push a tag such as `v0.2.0`.
+Making a release: set `version` in `Cargo.toml`, then push a tag such as `v0.3.0`.
 `.github/workflows/release.yml` builds, tests and packages on Linux and Windows and publishes a
-GitHub Release with generated notes (tags containing `-`, e.g. `v0.2.0-rc1`, become pre-releases).
+GitHub Release with generated notes (tags containing `-`, e.g. `v0.3.0-rc1`, become pre-releases).
 
 ## Build & run
 
