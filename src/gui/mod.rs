@@ -11,6 +11,9 @@ mod state;
 pub mod update;
 mod waveform;
 
+/// Opened in the browser only when the user clicks "Support development" in the Help menu.
+const SPONSOR_URL: &str = "https://github.com/sponsors/RamazanBerk20";
+
 use bidi::Base;
 use editor::{Editor, Tool};
 use eframe::egui;
@@ -1152,6 +1155,9 @@ impl App {
                 ui.label(format!("{} R C L K V I D Q M(level1/VDMOS) E F G H B S X", tr("Elements:")));
                 ui.separator();
                 ui.label(format!("SwiftSim {}", update::VERSION));
+                if ui.link(tr("Support development")).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(SPONSOR_URL));
+                }
                 if ui.button(tr("Check for updates now")).clicked() {
                     self.update_event(&ctx, update::Event::Check { manual: true });
                     ui.close();
@@ -2811,6 +2817,21 @@ fn examples() -> Vec<(&'static str, Schematic)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sponsor_link_is_only_in_the_help_menu() {
+        assert_eq!(
+            super::SPONSOR_URL,
+            "https://github.com/sponsors/RamazanBerk20"
+        );
+        let src = include_str!("mod.rs");
+        let help = src.find("i18n::menu(ui, tr(\"Help\")").unwrap();
+        let end = help + src[help..].find("Copy MCP server command").unwrap();
+        let uses: Vec<_> = src
+            .match_indices(concat!("new_tab(SPONSOR", "_URL)"))
+            .collect();
+        assert!(uses.len() == 1 && (help..end).contains(&uses[0].0));
+    }
+
     #[test]
     fn examples_simulate() {
         for (name, s) in super::examples() {

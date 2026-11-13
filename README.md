@@ -305,6 +305,11 @@ and only the Python standard library. Tolerances: `.op`/`.dc` 1e-6 relative at e
 (both run with reltol=1e-9), `.tran` 1% of each signal's range, `.ac` 0.1 dB and 1°,
 `.noise` spectra and integrated totals 0.1 dB (they agree within 0.03 dB), oscillators by period. The remaining known differences are listed at the top of `compare.py`.
 
+## Support
+
+SwiftSim is free. If it is useful to you, you can
+[sponsor its development](https://github.com/sponsors/RamazanBerk20) through GitHub Sponsors.
+
 ## License
 
 SwiftSim is licensed under either of [Apache License 2.0](LICENSE-APACHE) or
