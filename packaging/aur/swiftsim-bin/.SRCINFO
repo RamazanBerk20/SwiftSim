@@ -24,6 +24,6 @@ pkgbase = swiftsim-bin
 	provides = swiftsim
 	conflicts = swiftsim
 	source = swiftsim-0.3.0-linux-x86_64.tar.gz::https://github.com/RamazanBerk20/SwiftSim/releases/download/v0.3.0/swiftsim-linux-x86_64.tar.gz
-	sha256sums = fab3bb48878c69e458f7f3d33872037a67aa4e061f69551f0537390fc1631ca3
+	sha256sums = 38cf625dddc54c56cabdb6e97bfc59fabe7e2144f593f2e706f952ef582ea426
 
 pkgname = swiftsim-bin
