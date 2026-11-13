@@ -1,0 +1,5 @@
+av
+V1 a 0 PWL(0 0 10m 10)
+R1 a 0 1k
+.tran 10m
+.meas tran x AVG V(a) FROM=8m TO=2m

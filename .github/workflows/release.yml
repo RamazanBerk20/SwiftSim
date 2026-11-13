@@ -8,8 +8,13 @@ on:
   pull_request:
     paths: ['assets/**', 'packaging/**', 'build.rs', '.github/workflows/release.yml']
 
+# Third-party actions are pinned by commit (the comment names the tag that commit had), and every
+# tool downloaded during the build is pinned to a numbered release and checked against
+# packaging/linux/tools.sha256 before it runs.
 jobs:
   build:
+    permissions:
+      contents: read
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]
@@ -18,9 +23,11 @@ jobs:
       # the app reports this version and compares it with newer releases (empty for PR dry runs)
       SWIFTSIM_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo test --release
       - run: cargo build --release
 
@@ -33,7 +40,9 @@ jobs:
           # both fetched here, with retries: appimagetool's own runtime download has none
           fetch() { curl -fsSL --retry 12 --retry-delay 30 --retry-all-errors -o "$1" "$2"; }
           fetch "$RUNNER_TEMP/appimagetool" https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
-          fetch "$RUNNER_TEMP/runtime" https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
+          fetch "$RUNNER_TEMP/runtime" https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          # nothing downloaded runs or ships unless it is the exact file whose hash is committed
+          (cd "$RUNNER_TEMP" && sha256sum --strict -c "$GITHUB_WORKSPACE/packaging/linux/tools.sha256")
           chmod +x "$RUNNER_TEMP/appimagetool"
           packaging/linux/package.sh "$RUNNER_TEMP/appimagetool" "$RUNNER_TEMP/runtime"
 
@@ -45,7 +54,7 @@ jobs:
           Compress-Archive -Path target/release/swiftsim.exe, packaging/windows/register-sws.cmd, LICENSE-MIT, LICENSE-APACHE, LICENSE-OFL, README.md -DestinationPath dist/swiftsim-windows-x86_64.zip
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging/windows/swiftsim.iss
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-${{ runner.os }}
           path: dist/
@@ -58,7 +67,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           merge-multiple: true
@@ -68,4 +77,6 @@ jobs:
         run: |
           # Tags with a hyphen (v1.0.0-rc1, v0.0.0-test) become pre-releases.
           pre=$([[ "$GITHUB_REF_NAME" == *-* ]] && echo --prerelease || true)
+          # the in-app updater installs a file only if its hash matches this list
+          (cd dist && sha256sum -- * > SHA256SUMS)
           gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes $pre

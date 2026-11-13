@@ -4,9 +4,11 @@ pub mod devices;
 pub mod expr;
 pub mod measure;
 pub mod netlist;
+pub mod raw;
 pub mod sim;
 pub mod solver;
 
+pub use raw::to_raw;
 pub use sim::{Control, Plot, PlotKind, SimResult, run_netlist};
 
 /// CSV of all plots (AC exported as magnitude dB / phase degrees).

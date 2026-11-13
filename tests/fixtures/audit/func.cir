@@ -1,0 +1,38 @@
+f
+.func f0(x) {x+x}
+.func f1(x) {f0(x)+f0(x)}
+.func f2(x) {f1(x)+f1(x)}
+.func f3(x) {f2(x)+f2(x)}
+.func f4(x) {f3(x)+f3(x)}
+.func f5(x) {f4(x)+f4(x)}
+.func f6(x) {f5(x)+f5(x)}
+.func f7(x) {f6(x)+f6(x)}
+.func f8(x) {f7(x)+f7(x)}
+.func f9(x) {f8(x)+f8(x)}
+.func f10(x) {f9(x)+f9(x)}
+.func f11(x) {f10(x)+f10(x)}
+.func f12(x) {f11(x)+f11(x)}
+.func f13(x) {f12(x)+f12(x)}
+.func f14(x) {f13(x)+f13(x)}
+.func f15(x) {f14(x)+f14(x)}
+.func f16(x) {f15(x)+f15(x)}
+.func f17(x) {f16(x)+f16(x)}
+.func f18(x) {f17(x)+f17(x)}
+.func f19(x) {f18(x)+f18(x)}
+.func f20(x) {f19(x)+f19(x)}
+.func f21(x) {f20(x)+f20(x)}
+.func f22(x) {f21(x)+f21(x)}
+.func f23(x) {f22(x)+f22(x)}
+.func f24(x) {f23(x)+f23(x)}
+.func f25(x) {f24(x)+f24(x)}
+.func f26(x) {f25(x)+f25(x)}
+.func f27(x) {f26(x)+f26(x)}
+.func f28(x) {f27(x)+f27(x)}
+.func f29(x) {f28(x)+f28(x)}
+.func f30(x) {f29(x)+f29(x)}
+.func f31(x) {f30(x)+f30(x)}
+.func f32(x) {f31(x)+f31(x)}
+.func f33(x) {f32(x)+f32(x)}
+V1 a 0 {f33(1)}
+R1 a 0 1
+.op

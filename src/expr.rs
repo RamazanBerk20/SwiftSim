@@ -9,12 +9,19 @@ pub fn fold(s: &str) -> String {
     if s.is_ascii() {
         return s.to_ascii_lowercase();
     }
-    normalized(s).to_lowercase().replace("i\u{307}", "i").replace('ı', "i").replace('ς', "σ").replace('ß', "ss")
+    normalized(s)
+        .to_lowercase()
+        .replace("i\u{307}", "i")
+        .replace('ı', "i")
+        .replace('ς', "σ")
+        .replace('ß', "ss")
 }
 
 /// NFC, without the variation selectors some keyboards add to emoji (❤ and ❤️ are one name).
 fn normalized(s: &str) -> String {
-    icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(s).replace(['\u{FE0E}', '\u{FE0F}'], "")
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfc()
+        .normalize(s)
+        .replace(['\u{FE0E}', '\u{FE0F}'], "")
 }
 
 /// True when two spellings with the same `fold` key look like different words, such as `kır` and
@@ -22,7 +29,12 @@ fn normalized(s: &str) -> String {
 /// (`KIR` is `kır` or `kir`, depending on who wrote it).
 pub fn distinct_spellings(a: &str, b: &str) -> bool {
     let plain = |s: &str| normalized(s).to_lowercase();
-    let turkish = |s: &str| normalized(s).replace('I', "ı").replace('İ', "i").to_lowercase();
+    let turkish = |s: &str| {
+        normalized(s)
+            .replace('I', "ı")
+            .replace('İ', "i")
+            .to_lowercase()
+    };
     plain(a) != plain(b) && turkish(a) != turkish(b)
 }
 
@@ -182,11 +194,29 @@ pub type Funcs = std::collections::HashMap<String, Func>;
 
 /// Parse `name(a, b) {body}` (the text after `.func`; `=` before the body is optional).
 pub fn parse_func(s: &str) -> Result<(String, Func), String> {
-    let (name, r) = s.split_once('(').ok_or_else(|| format!(".func '{s}': expected name(args)"))?;
-    let (args, body) = r.split_once(')').ok_or_else(|| format!(".func '{s}': missing ')'"))?;
-    let args = args.split(',').map(|a| a.trim().to_ascii_lowercase()).filter(|a| !a.is_empty()).collect();
-    let body = body.trim().trim_start_matches('=').trim().trim_matches('\'');
-    Ok((name.trim().to_ascii_lowercase(), Func { args, body: Expr::parse(body)? }))
+    let (name, r) = s
+        .split_once('(')
+        .ok_or_else(|| format!(".func '{s}': expected name(args)"))?;
+    let (args, body) = r
+        .split_once(')')
+        .ok_or_else(|| format!(".func '{s}': missing ')'"))?;
+    let args = args
+        .split(',')
+        .map(|a| a.trim().to_ascii_lowercase())
+        .filter(|a| !a.is_empty())
+        .collect();
+    let body = body
+        .trim()
+        .trim_start_matches('=')
+        .trim()
+        .trim_matches('\'');
+    Ok((
+        name.trim().to_ascii_lowercase(),
+        Func {
+            args,
+            body: Expr::parse(body)?,
+        },
+    ))
 }
 
 /// Values an expression may look up while evaluating.
@@ -215,7 +245,12 @@ impl Env for VarEnv<'_> {
 
 impl Expr {
     pub fn parse(s: &str) -> Result<Expr, String> {
-        let mut p = Parser { s: s.as_bytes(), src: s, i: 0 };
+        let mut p = Parser {
+            s: s.as_bytes(),
+            src: s,
+            i: 0,
+            nest: 0,
+        };
         let e = p.ternary()?;
         p.ws();
         if p.i != p.s.len() {
@@ -229,7 +264,9 @@ impl Expr {
             Expr::Num(v) => *v,
             Expr::Time => env.time(),
             Expr::X(i) => env.x(*i),
-            Expr::Var(n) => env.var(n).ok_or_else(|| format!("unknown parameter '{n}'"))?,
+            Expr::Var(n) => env
+                .var(n)
+                .ok_or_else(|| format!("unknown parameter '{n}'"))?,
             Expr::Sig(n) => env.sig(n).ok_or_else(|| format!("unknown signal '{n}'"))?,
             Expr::Neg(a) => -a.eval(env)?,
             Expr::Not(a) => b2f(a.eval(env)? == 0.0),
@@ -261,7 +298,11 @@ impl Expr {
             }
             Expr::Call(f, args) => {
                 if f == "if" && args.len() == 3 {
-                    return if args[0].eval(env)? != 0.0 { args[1].eval(env) } else { args[2].eval(env) };
+                    return if args[0].eval(env)? != 0.0 {
+                        args[1].eval(env)
+                    } else {
+                        args[2].eval(env)
+                    };
                 }
                 let v: Vec<f64> = args.iter().map(|a| a.eval(env)).collect::<Result<_, _>>()?;
                 call(f, &v)?
@@ -283,7 +324,9 @@ impl Expr {
             Expr::Not(a) => Expr::Not(r(a)),
             Expr::Bin(o, a, b) => Expr::Bin(*o, r(a), r(b)),
             Expr::Cond(c, a, b) => Expr::Cond(r(c), r(a), r(b)),
-            Expr::Call(f, a) => Expr::Call(f.clone(), a.iter().map(|e| e.resolve(var, sig)).collect()),
+            Expr::Call(f, a) => {
+                Expr::Call(f.clone(), a.iter().map(|e| e.resolve(var, sig)).collect())
+            }
             _ => self.clone(),
         }
     }
@@ -295,7 +338,9 @@ impl Expr {
             Expr::Not(a) => Expr::Not(Box::new(f(a)?)),
             Expr::Bin(o, a, b) => Expr::Bin(*o, Box::new(f(a)?), Box::new(f(b)?)),
             Expr::Cond(c, a, b) => Expr::Cond(Box::new(f(c)?), Box::new(f(a)?), Box::new(f(b)?)),
-            Expr::Call(n, a) => Expr::Call(n.clone(), a.iter().map(&mut *f).collect::<Result<_, _>>()?),
+            Expr::Call(n, a) => {
+                Expr::Call(n.clone(), a.iter().map(&mut *f).collect::<Result<_, _>>()?)
+            }
             _ => self.clone(),
         })
     }
@@ -305,10 +350,11 @@ impl Expr {
         if funcs.is_empty() {
             return Ok(self.clone());
         }
-        self.inline_d(funcs, 0)
+        let mut budget = MAX_NODES;
+        self.inline_d(funcs, 0, &mut budget)
     }
 
-    fn inline_d(&self, funcs: &Funcs, depth: usize) -> Result<Expr, String> {
+    fn inline_d(&self, funcs: &Funcs, depth: usize, budget: &mut usize) -> Result<Expr, String> {
         if let Expr::Call(n, a) = self
             && let Some(f) = funcs.get(n)
         {
@@ -318,16 +364,49 @@ impl Expr {
             if a.len() != f.args.len() {
                 return Err(format!("{n}() takes {} argument(s)", f.args.len()));
             }
-            let a: Vec<Expr> = a.iter().map(|e| e.inline_d(funcs, depth)).collect::<Result<_, _>>()?;
-            return Ok(f.body.inline_d(funcs, depth + 1)?.subst(&f.args, &a));
+            let a: Vec<Expr> = a
+                .iter()
+                .map(|e| e.inline_d(funcs, depth, budget))
+                .collect::<Result<_, _>>()?;
+            let body = f.body.inline_d(funcs, depth + 1, budget)?;
+            // bound the copy before making it: every use of a parameter copies the whole argument
+            let (bn, bd) = body.size();
+            let (an, ad) = a
+                .iter()
+                .map(Expr::size)
+                .fold((1, 0), |(n, d), (x, y)| (n.max(x), d.max(y)));
+            let nodes = bn.saturating_mul(an);
+            if nodes > *budget || bd + ad > MAX_DEPTH {
+                return Err(format!(
+                    "function '{n}' expands to an expression that is too large"
+                ));
+            }
+            *budget -= nodes;
+            return Ok(body.subst(&f.args, &a));
         }
-        self.map(&mut |e| e.inline_d(funcs, depth))
+        self.map(&mut |e| e.inline_d(funcs, depth, budget))
+    }
+
+    /// (node count, depth) of the tree.
+    fn size(&self) -> (usize, usize) {
+        let mut kids = Vec::new();
+        let _ = self.map(&mut |e| {
+            kids.push(e.size());
+            Ok(Expr::Num(0.0))
+        });
+        kids.iter()
+            .fold((1, 1), |(n, d), &(x, y)| (n + x, d.max(y + 1)))
     }
 
     fn subst(&self, names: &[String], vals: &[Expr]) -> Expr {
         match self {
-            Expr::Var(n) => names.iter().position(|a| a == n).map_or_else(|| self.clone(), |i| vals[i].clone()),
-            _ => self.map(&mut |e| Ok(e.subst(names, vals))).expect("subst cannot fail"),
+            Expr::Var(n) => names
+                .iter()
+                .position(|a| a == n)
+                .map_or_else(|| self.clone(), |i| vals[i].clone()),
+            _ => self
+                .map(&mut |e| Ok(e.subst(names, vals)))
+                .expect("subst cannot fail"),
         }
     }
 
@@ -357,8 +436,15 @@ impl Expr {
             Expr::Neg(a) => Expr::Neg(Box::new(a.bind(f)?)),
             Expr::Not(a) => Expr::Not(Box::new(a.bind(f)?)),
             Expr::Bin(o, a, b) => Expr::Bin(*o, Box::new(a.bind(f)?), Box::new(b.bind(f)?)),
-            Expr::Cond(c, a, b) => Expr::Cond(Box::new(c.bind(f)?), Box::new(a.bind(f)?), Box::new(b.bind(f)?)),
-            Expr::Call(n, a) => Expr::Call(n.clone(), a.iter().map(|e| e.bind(f)).collect::<Result<_, _>>()?),
+            Expr::Cond(c, a, b) => Expr::Cond(
+                Box::new(c.bind(f)?),
+                Box::new(a.bind(f)?),
+                Box::new(b.bind(f)?),
+            ),
+            Expr::Call(n, a) => Expr::Call(
+                n.clone(),
+                a.iter().map(|e| e.bind(f)).collect::<Result<_, _>>()?,
+            ),
             _ => self.clone(),
         })
     }
@@ -382,7 +468,11 @@ fn b2f(b: bool) -> f64 {
 fn call(f: &str, a: &[f64]) -> Result<f64, String> {
     let n = a.len();
     let need = |k: usize| -> Result<(), String> {
-        if n == k { Ok(()) } else { Err(format!("{f}() takes {k} argument(s)")) }
+        if n == k {
+            Ok(())
+        } else {
+            Err(format!("{f}() takes {k} argument(s)"))
+        }
     };
     Ok(match f {
         "abs" => (need(1)?, a[0].abs()).1,
@@ -404,11 +494,33 @@ fn call(f: &str, a: &[f64]) -> Result<f64, String> {
         "ceil" => (need(1)?, a[0].ceil()).1,
         "round" => (need(1)?, a[0].round()).1,
         "int" => (need(1)?, a[0].trunc()).1,
-        "sgn" | "sign" => (need(1)?, if a[0] > 0.0 { 1.0 } else if a[0] < 0.0 { -1.0 } else { 0.0 }).1,
+        "sgn" | "sign" => {
+            (
+                need(1)?,
+                if a[0] > 0.0 {
+                    1.0
+                } else if a[0] < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                },
+            )
+                .1
+        }
         "u" | "step" => (need(1)?, b2f(a[0] > 0.0)).1,
         "uramp" => (need(1)?, a[0].max(0.0)).1,
         "db" => (need(1)?, 20.0 * a[0].abs().log10()).1,
-        "pow" | "pwr" => (need(2)?, if f == "pwr" { a[0].abs().powf(a[1]) } else { a[0].powf(a[1]) }).1,
+        "pow" | "pwr" => {
+            (
+                need(2)?,
+                if f == "pwr" {
+                    a[0].abs().powf(a[1])
+                } else {
+                    a[0].powf(a[1])
+                },
+            )
+                .1
+        }
         "pwrs" => (need(2)?, a[0].signum() * a[0].abs().powf(a[1])).1,
         "min" => (need(2)?, a[0].min(a[1])).1,
         "max" => (need(2)?, a[0].max(a[1])).1,
@@ -439,13 +551,33 @@ fn call(f: &str, a: &[f64]) -> Result<f64, String> {
     })
 }
 
-/// Uniform [0,1) from a per-thread xorshift generator.
+std::thread_local!(static RNG: std::cell::Cell<u64> = std::cell::Cell::new(mix(clock_seed())));
+
+/// splitmix64's finalizer: nearby inputs give unrelated outputs (never 0).
+pub fn mix(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (z ^ (z >> 31)) | 1
+}
+
+/// A seed that differs from run to run (and between runs started in the same nanosecond).
+pub fn clock_seed() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    mix(t ^ mix(N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
+}
+
+/// Restarts this thread's Monte Carlo stream (`rand`, `mc`, `flat`, `gauss`) from `seed`.
+pub fn seed_random(seed: u64) {
+    RNG.with(|s| s.set(mix(seed)));
+}
+
+/// Uniform [0,1) from this thread's xorshift generator.
 fn rnd() -> f64 {
-    use std::cell::Cell;
-    thread_local!(static S: Cell<u64> = Cell::new(
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0x9E37_79B9, |d| d.as_nanos() as u64) | 1
-    ));
-    S.with(|s| {
+    RNG.with(|s| {
         let mut x = s.get();
         x ^= x << 13;
         x ^= x >> 7;
@@ -461,13 +593,30 @@ fn gauss() -> f64 {
     (-2.0 * u.ln()).sqrt() * (2.0 * std::f64::consts::PI * rnd()).cos()
 }
 
+/// Deepest expression tree accepted: every walk over a tree (parse, eval, bind, drop) recurses,
+/// and a simulation thread has a 2 MiB stack.
+const MAX_DEPTH: usize = 1000;
+/// Most nodes `.func` inlining may create for one expression.
+const MAX_NODES: usize = 1_000_000;
+
 struct Parser<'a> {
     s: &'a [u8],
     src: &'a str,
     i: usize,
+    /// Depth of the tree being built (over-estimated); a paren level counts more because the parser
+    /// spends ten stack frames on it.
+    nest: usize,
 }
 
 impl Parser<'_> {
+    fn enter(&mut self, cost: usize) -> Result<(), String> {
+        self.nest += cost;
+        if self.nest > MAX_DEPTH {
+            let head: String = self.src.chars().take(40).collect();
+            return Err(format!("expression nested too deeply: '{head}…'"));
+        }
+        Ok(())
+    }
     fn ws(&mut self) {
         while self.i < self.s.len() && self.s[self.i].is_ascii_whitespace() {
             self.i += 1;
@@ -485,30 +634,52 @@ impl Parser<'_> {
     fn ternary(&mut self) -> Result<Expr, String> {
         let c = self.or()?;
         if self.eat("?") {
+            self.enter(4)?;
             let a = self.ternary()?;
             if !self.eat(":") {
                 return Err("expected ':' in ?: expression".into());
             }
             let b = self.ternary()?;
+            self.nest -= 4;
             return Ok(Expr::Cond(Box::new(c), Box::new(a), Box::new(b)));
         }
         Ok(c)
     }
     fn or(&mut self) -> Result<Expr, String> {
+        let nest = self.nest;
+        let r = self.or_chain();
+        self.nest = nest;
+        r
+    }
+    fn or_chain(&mut self) -> Result<Expr, String> {
         let mut l = self.and()?;
         while self.eat("||") {
+            self.enter(1)?;
             l = Expr::Bin(Op::Or, Box::new(l), Box::new(self.and()?));
         }
         Ok(l)
     }
     fn and(&mut self) -> Result<Expr, String> {
+        let nest = self.nest;
+        let r = self.and_chain();
+        self.nest = nest;
+        r
+    }
+    fn and_chain(&mut self) -> Result<Expr, String> {
         let mut l = self.eq()?;
         while self.eat("&&") {
+            self.enter(1)?;
             l = Expr::Bin(Op::And, Box::new(l), Box::new(self.eq()?));
         }
         Ok(l)
     }
     fn eq(&mut self) -> Result<Expr, String> {
+        let nest = self.nest;
+        let r = self.eq_chain();
+        self.nest = nest;
+        r
+    }
+    fn eq_chain(&mut self) -> Result<Expr, String> {
         let mut l = self.cmp()?;
         loop {
             let op = if self.eat("==") {
@@ -518,10 +689,17 @@ impl Parser<'_> {
             } else {
                 return Ok(l);
             };
+            self.enter(1)?;
             l = Expr::Bin(op, Box::new(l), Box::new(self.cmp()?));
         }
     }
     fn cmp(&mut self) -> Result<Expr, String> {
+        let nest = self.nest;
+        let r = self.cmp_chain();
+        self.nest = nest;
+        r
+    }
+    fn cmp_chain(&mut self) -> Result<Expr, String> {
         let mut l = self.add()?;
         loop {
             let op = if self.eat("<=") {
@@ -535,10 +713,17 @@ impl Parser<'_> {
             } else {
                 return Ok(l);
             };
+            self.enter(1)?;
             l = Expr::Bin(op, Box::new(l), Box::new(self.add()?));
         }
     }
     fn add(&mut self) -> Result<Expr, String> {
+        let nest = self.nest;
+        let r = self.add_chain();
+        self.nest = nest;
+        r
+    }
+    fn add_chain(&mut self) -> Result<Expr, String> {
         let mut l = self.mul()?;
         loop {
             let op = if self.eat("+") {
@@ -548,10 +733,17 @@ impl Parser<'_> {
             } else {
                 return Ok(l);
             };
+            self.enter(1)?;
             l = Expr::Bin(op, Box::new(l), Box::new(self.mul()?));
         }
     }
     fn mul(&mut self) -> Result<Expr, String> {
+        let nest = self.nest;
+        let r = self.mul_chain();
+        self.nest = nest;
+        r
+    }
+    fn mul_chain(&mut self) -> Result<Expr, String> {
         let mut l = self.unary()?;
         loop {
             self.ws();
@@ -565,10 +757,18 @@ impl Parser<'_> {
             } else {
                 return Ok(l);
             };
+            self.enter(1)?;
             l = Expr::Bin(op, Box::new(l), Box::new(self.unary()?));
         }
     }
     fn unary(&mut self) -> Result<Expr, String> {
+        let nest = self.nest;
+        let r = self.unary_nested();
+        self.nest = nest;
+        r
+    }
+    fn unary_nested(&mut self) -> Result<Expr, String> {
+        self.enter(1)?;
         if self.eat("-") {
             return Ok(Expr::Neg(Box::new(self.unary()?)));
         }
@@ -596,7 +796,9 @@ impl Parser<'_> {
         let c = self.s[self.i];
         if c == b'(' || c == b'{' {
             self.i += 1;
+            self.enter(4)?;
             let e = self.ternary()?;
+            self.nest -= 4;
             if !(self.eat(")") || self.eat("}")) {
                 return Err(format!("missing ')' in '{}'", self.src));
             }
@@ -610,7 +812,9 @@ impl Parser<'_> {
         }
         if c.is_ascii_alphabetic() || c == b'_' {
             let st = self.i;
-            while self.i < self.s.len() && (self.s[self.i].is_ascii_alphanumeric() || self.s[self.i] == b'_') {
+            while self.i < self.s.len()
+                && (self.s[self.i].is_ascii_alphanumeric() || self.s[self.i] == b'_')
+            {
                 self.i += 1;
             }
             let name = self.src[st..self.i].to_ascii_lowercase();
@@ -625,10 +829,18 @@ impl Parser<'_> {
                 let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
                 if name == "v" {
                     // ground is 0 V by definition and is never a stored signal
-                    let node = |n: &str| if matches!(n, "0" | "gnd") { Expr::Num(0.0) } else { Expr::Sig(format!("v({n})")) };
+                    let node = |n: &str| {
+                        if matches!(n, "0" | "gnd") {
+                            Expr::Num(0.0)
+                        } else {
+                            Expr::Sig(format!("v({n})"))
+                        }
+                    };
                     let a = node(parts[0]);
                     return Ok(match parts.get(1) {
-                        Some(b) if !b.is_empty() => Expr::Bin(Op::Sub, Box::new(a), Box::new(node(b))),
+                        Some(b) if !b.is_empty() => {
+                            Expr::Bin(Op::Sub, Box::new(a), Box::new(node(b)))
+                        }
                         _ => a,
                     });
                 }
@@ -636,6 +848,7 @@ impl Parser<'_> {
             }
             if call {
                 self.i += 1;
+                self.enter(4)?;
                 let mut args = Vec::new();
                 if !self.eat(")") {
                     loop {
@@ -648,6 +861,7 @@ impl Parser<'_> {
                         }
                     }
                 }
+                self.nest -= 4;
                 return Ok(Expr::Call(name, args));
             }
             return Ok(match name.as_str() {
@@ -663,7 +877,10 @@ impl Parser<'_> {
 }
 
 fn is_signal_fn(n: &str) -> bool {
-    matches!(n, "v" | "i" | "ic" | "ib" | "ie" | "id" | "ig" | "is" | "ix")
+    matches!(
+        n,
+        "v" | "i" | "ic" | "ib" | "ie" | "id" | "ig" | "is" | "ix"
+    )
 }
 
 #[cfg(test)]
@@ -710,5 +927,62 @@ mod tests {
         let mut v = vec![];
         s.signals(&mut v);
         assert_eq!(v, vec!["v(a)", "v(b)", "i(r1)"]);
+    }
+
+    /// Hostile nesting is an error, not a stack overflow, on a simulation thread's stack.
+    #[test]
+    fn deep_expressions_are_rejected() {
+        std::thread::Builder::new()
+            .stack_size(crate::sim::STACK)
+            .spawn(|| {
+                let deep =
+                    |open: &str, close: &str, n| format!("{}1{}", open.repeat(n), close.repeat(n));
+                for s in [
+                    deep("(", ")", 10_000),
+                    deep("{", "}", 10_000),
+                    deep("-", "", 100_000),
+                    deep("!", "", 100_000),
+                    deep("f(", ")", 10_000),
+                    deep("1?", ":1", 10_000),
+                    deep("2**", "", 10_000),
+                    vec!["1"; 200_000].join("+"),
+                    vec!["1"; 200_000].join("*"),
+                ] {
+                    let e = Expr::parse(&s);
+                    assert!(
+                        e.as_ref().is_err_and(|e| e.contains("nested too deeply")),
+                        "{:?}",
+                        e.map(|_| ())
+                    );
+                }
+                // ordinary sizes still parse: 150 nested parens, a 500-term sum
+                let e = |s: &str| Expr::parse(s).unwrap().eval(&VarEnv(&|_| None)).unwrap();
+                assert_eq!(e(&deep("(", ")", 150)), 1.0);
+                assert_eq!(e(&vec!["1"; 500].join("+")), 500.0);
+                // the deepest accepted tree can be evaluated and inlined on this stack
+                let mut f = Funcs::new();
+                let (n, g) = parse_func(&format!("g(x) {{{}}}", deep("(", "+x)", 150))).unwrap();
+                f.insert(n, g);
+                assert!(Expr::parse("g(g(1))").unwrap().inline(&f).is_ok());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// Doubling `.func` chains are cut off at a node budget instead of running for hours.
+    #[test]
+    fn exploding_funcs_are_rejected() {
+        let mut f = Funcs::new();
+        f.insert("f0".into(), parse_func("f0(x) {x}").unwrap().1);
+        for i in 1..=34 {
+            let (n, g) = parse_func(&format!("f{i}(x) {{f{0}(x)+f{0}(x)}}", i - 1)).unwrap();
+            f.insert(n, g);
+        }
+        let t = std::time::Instant::now();
+        let e = Expr::parse("f34(1)").unwrap().inline(&f);
+        assert!(e.is_err_and(|e| e.contains("too large")));
+        assert!(t.elapsed().as_secs() < 5);
+        assert!(Expr::parse("f10(1)").unwrap().inline(&f).is_ok());
     }
 }

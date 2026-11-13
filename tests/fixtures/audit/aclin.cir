@@ -1,0 +1,4 @@
+ac
+V1 a 0 AC 1
+R1 a 0 1k
+.ac lin 1e11 1 2

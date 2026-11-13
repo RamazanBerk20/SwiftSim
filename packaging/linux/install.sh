@@ -6,7 +6,9 @@ cd "$(dirname "$0")"
 PREFIX="${PREFIX:-$HOME/.local}"
 install -Dm755 swiftsim "$PREFIX/bin/swiftsim"
 mkdir -p "$PREFIX/share/applications"
-sed "s|^Exec=swiftsim|Exec=$PREFIX/bin/swiftsim|" swiftsim.desktop > "$PREFIX/share/applications/swiftsim.desktop"
+# Exec= quoting per the desktop-entry spec: the path in double quotes with " ` $ \ escaped, then every \ doubled
+exe=$(printf '%s' "$PREFIX/bin/swiftsim" | sed 's/[\\"`$]/\\&/g; s/\\/\\\\/g')
+EXEC="\"$exe\"" awk '/^Exec=swiftsim/ { print "Exec=" ENVIRON["EXEC"] substr($0, 14); next } { print }' swiftsim.desktop > "$PREFIX/share/applications/swiftsim.desktop"
 install -Dm644 swiftsim.xml "$PREFIX/share/mime/packages/swiftsim.xml"
 install -Dm644 swiftsim.svg "$PREFIX/share/icons/hicolor/scalable/apps/swiftsim.svg"
 for f in icons/*.png; do

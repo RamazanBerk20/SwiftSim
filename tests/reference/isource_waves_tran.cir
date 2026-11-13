@@ -1,0 +1,13 @@
+* Time-dependent current sources: I(I1..I3) and I(B1) against ngspice's @i[current] / @b[i]
+I1 0 a PULSE(0 1m 10u 1u 1u 20u 50u)
+R1 a 0 1k
+I2 0 b SIN(0.5m 1m 20k)
+R2 b 0 2k
+I3 c 0 PWL(0 0 30u 2m 60u -1m 100u 0)
+R3 c 0 500
+C3 c 0 10n
+B1 0 d I=1m*sin(2*pi*10k*time) + V(a)*1m
+R4 d 0 1k
+.save all @i1[current] @i2[current] @i3[current] @b1[i]
+.tran 0.1u 100u 0 0.1u
+.end

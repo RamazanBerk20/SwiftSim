@@ -1,0 +1,6 @@
+pi
+I1 0 a PULSE(0 1m 1u 1n 1n 1u 2u)
+R1 a 0 1k
+B1 0 b I=time*1k
+R2 b 0 1
+.tran 5u

@@ -1,0 +1,5 @@
+f
+V1 a 0 1
+R1 a 0 1k
+.tran 1m
+.four 1k 1e10 V(a)

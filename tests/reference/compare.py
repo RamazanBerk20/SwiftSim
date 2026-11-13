@@ -7,6 +7,8 @@ currents).
     python3 -I tests/reference/compare.py [-v] [name ...]
 
 Needs `ngspice` on PATH. Standard library only. Exit status 1 if a circuit fails.
+Current sources and B sources are compared when the deck saves them for ngspice
+(`.save all @i1[current] @b1[i]`; SwiftSim ignores .save).
 
 How it compares:
   .op         every value, |a-b| <= OP_RTOL*max(|a|,|b|) + OP_ATOL (V or A)
@@ -165,6 +167,8 @@ def read_raw(path):
         nv, npt = int(info["No. Variables"]), int(info["No. Points"])
         names = [hdr[k + 1 + j].split()[1].lower() for j in range(nv)]
         names = [f"i({n[:-7]})" if n.endswith("#branch") else n for n in names]
+        # current-source and B-source currents, saved by `.save all @i1[current] @b1[i]`
+        names = [re.sub(r"^i\(@(\w+)\[(?:current|i)\]\)$", r"i(\1)", n) for n in names]
         names = [{"onoise_spectrum": "v(onoise)", "inoise_spectrum": "v(inoise)"}.get(n, n) for n in names]
         w = 2 if "complex" in info["Flags"] else 1
         a = array("d")

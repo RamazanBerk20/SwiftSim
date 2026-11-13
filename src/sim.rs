@@ -7,7 +7,7 @@ use crate::netlist::{Analysis, Deck};
 use crate::solver::{C64, Matrix};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Instant;
 
 #[derive(Clone, Debug)]
@@ -26,7 +26,17 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { reltol: 1e-3, abstol: 1e-12, vntol: 1e-6, gmin: 1e-12, itl1: 150, itl4: 25, trtol: 7.0, maxstep: 0.0, tnom: 27.0 }
+        Options {
+            reltol: 1e-3,
+            abstol: 1e-12,
+            vntol: 1e-6,
+            gmin: 1e-12,
+            itl1: 150,
+            itl4: 25,
+            trtol: 7.0,
+            maxstep: 0.0,
+            tnom: 27.0,
+        }
     }
 }
 
@@ -71,7 +81,13 @@ pub struct Plot {
 impl Plot {
     pub fn index(&self, name: &str) -> Option<usize> {
         let n = crate::expr::fold(name);
-        self.names.iter().position(|s| if s.is_ascii() { *s == n } else { crate::expr::fold(s) == n })
+        self.names.iter().position(|s| {
+            if s.is_ascii() {
+                *s == n
+            } else {
+                crate::expr::fold(s) == n
+            }
+        })
     }
 }
 
@@ -83,11 +99,59 @@ pub struct SimResult {
     pub meas: Vec<(String, String, f64)>,
 }
 
+/// Stack size for threads that run the engine: expressions may nest up to `expr`'s depth limit,
+/// and recursion over them is deeper in unoptimized builds.
+pub const STACK: usize = 16 << 20;
+
 /// Shared with the UI thread: cancel flag and progress in 1/1000.
 #[derive(Default)]
 pub struct Control {
     pub cancel: AtomicBool,
     pub progress: AtomicU32,
+    /// `.step` points finished, and how many there are.
+    pub points_done: AtomicUsize,
+    pub points: AtomicUsize,
+    /// Worker threads for `.step` points; 0 = automatic (see `workers`).
+    pub jobs: usize,
+    /// Monte Carlo seed of the run; `None` takes `SWIFTSIM_SEED`, else a new one each run.
+    pub seed: Option<u64>,
+}
+
+/// The run's Monte Carlo seed: point `ci` of a `.step` draws from `point_seed(seed, ci)`, the
+/// same stream whichever thread runs it, so serial and parallel runs agree bit for bit.
+fn run_seed(ctl: &Control) -> u64 {
+    ctl.seed
+        .or_else(|| std::env::var("SWIFTSIM_SEED").ok()?.trim().parse().ok())
+        .unwrap_or_else(crate::expr::clock_seed)
+}
+
+fn point_seed(seed: u64, ci: usize) -> u64 {
+    crate::expr::mix(seed ^ crate::expr::mix(ci as u64 + 1))
+}
+
+/// Threads a run of `points` `.step` points uses: one per core but one, capped by `SWIFTSIM_JOBS`
+/// (1 = serial), or exactly `ctl.jobs` when that is set.
+pub fn workers(ctl: &Control, points: usize) -> usize {
+    let auto = std::thread::available_parallelism()
+        .map_or(1, |n| n.get().saturating_sub(1))
+        .max(1);
+    let n = if ctl.jobs > 0 {
+        ctl.jobs
+    } else {
+        std::env::var("SWIFTSIM_JOBS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .map_or(auto, |n| n.min(auto))
+    };
+    n.min(points).max(1)
+}
+
+/// One `.step` point's outcome: its plots, its report lines and its parameter values (for `.meas`).
+struct Point {
+    plots: Vec<Plot>,
+    log: Vec<String>,
+    vars: HashMap<String, f64>,
 }
 
 pub fn run_netlist(text: &str, base: Option<&Path>, ctl: &Control) -> Result<SimResult, String> {
@@ -97,58 +161,187 @@ pub fn run_netlist(text: &str, base: Option<&Path>, ctl: &Control) -> Result<Sim
 
 pub fn run(deck: &Deck, ctl: &Control) -> Result<SimResult, String> {
     let t0 = Instant::now();
+    let seed = run_seed(ctl);
+    crate::expr::seed_random(seed);
     let mut res = SimResult::default();
-    res.log.extend(deck.warnings.iter().map(|w| format!("warning: {w}")));
+    res.log
+        .extend(deck.warnings.iter().map(|w| format!("warning: {w}")));
     // .param lines may use .step variables, which only get values per step: provisionally 0 here
     // (enough to read the .step lines); each step below evaluates everything with its own values
-    let provisional: HashMap<String, f64> = deck.step_names().into_iter().map(|n| (n, 0.0)).collect();
+    let provisional: HashMap<String, f64> =
+        deck.step_names().into_iter().map(|n| (n, 0.0)).collect();
     let global = deck.eval_params(&provisional)?;
     let (steps, sw) = deck.steps(&global)?;
-    res.log.extend(sw.into_iter().map(|w| format!("warning: {w}")));
+    res.log
+        .extend(sw.into_iter().map(|w| format!("warning: {w}")));
+    if steps
+        .iter()
+        .try_fold(1usize, |n, s| {
+            n.checked_mul(s.values.len())
+                .filter(|&n| n <= crate::netlist::MAX_POINTS)
+        })
+        .is_none()
+    {
+        return Err(".step has too many combinations".into());
+    }
     let mut combos: Vec<Vec<(String, f64)>> = vec![vec![]];
     for s in &steps {
         combos = combos
             .into_iter()
-            .flat_map(|c| s.values.iter().map(move |&v| [c.clone(), vec![(s.name.clone(), v)]].concat()))
+            .flat_map(|c| {
+                s.values
+                    .iter()
+                    .map(move |&v| [c.clone(), vec![(s.name.clone(), v)]].concat())
+            })
             .collect();
     }
     let total = combos.len();
-    // each plot's own parameter values, for .meas
-    let mut scopes = vec![];
-    for (ci, combo) in combos.iter().enumerate() {
+    ctl.points.store(total, Ordering::Relaxed);
+    ctl.points_done.store(0, Ordering::Relaxed);
+    let nw = workers(ctl, total);
+    // each worker's progress through its current point, in 1/1000
+    let slots: Vec<AtomicU32> = (0..nw).map(|_| AtomicU32::new(0)).collect();
+    let point = |ci: usize, w: usize| -> Result<Point, String> {
+        crate::expr::seed_random(point_seed(seed, ci));
+        let combo = &combos[ci];
         let over: HashMap<String, f64> = combo.iter().cloned().collect();
-        let label = combo.iter().map(|(k, v)| format!("{k}={}", fmt_si(*v))).collect::<Vec<_>>().join(" ");
+        let label = combo
+            .iter()
+            .map(|(k, v)| format!("{k}={}", fmt_si(*v)))
+            .collect::<Vec<_>>()
+            .join(" ");
         let scope = deck.eval_params(&over)?;
         let an = deck.analysis(&scope)?;
         let ckt = deck.build(&over)?;
+        let mut log = vec![];
         if ci == 0 {
-            res.log.extend(ckt.warnings.iter().map(|w| format!("warning: {w}")));
+            log.extend(ckt.warnings.iter().map(|w| format!("warning: {w}")));
         }
         let mut eng = Engine::new(ckt);
-        let prog = Prog { ctl, base: ci as f64 / total as f64, span: 1.0 / total as f64 };
-        let plots = eng.analyze(&an, &prog, &label).map_err(|e| if label.is_empty() { e } else { format!("{e} (step {label})") })?;
+        let prog = Prog {
+            ctl,
+            slots: &slots,
+            me: w,
+            total,
+        };
+        let plots = eng.analyze(&an, &prog, &label).map_err(|e| {
+            if label.is_empty() {
+                e
+            } else {
+                format!("{e} (step {label})")
+            }
+        })?;
         match an {
-            Analysis::Op => res.log.extend(op_report(&plots[0], &label)),
+            Analysis::Op => log.extend(op_report(&plots[0], &label)),
             Analysis::Tf { .. } => {
-                res.log.push(format!("--- Transfer function {label} ---"));
+                log.push(format!("--- Transfer function {label} ---"));
                 for (n, v) in plots[0].names.iter().zip(&plots[0].re) {
-                    res.log.push(format!("{n:>30} = {}{}", fmt_si(v[0]), if n.contains("impedance") { "Ω" } else { "" }));
+                    log.push(format!(
+                        "{n:>30} = {}{}",
+                        fmt_si(v[0]),
+                        if n.contains("impedance") { "Ω" } else { "" }
+                    ));
                 }
             }
-            Analysis::Noise { .. } => res.log.extend(noise_report(&plots[0], &label)),
+            Analysis::Noise { .. } => log.extend(noise_report(&plots[0], &label)),
             Analysis::Tran { .. } => {
                 for l in &deck.four {
                     match crate::measure::fourier(&l.text, &plots[0], &scope) {
-                        Ok(lines) => res.log.extend(lines),
-                        Err(e) => res.log.push(format!("line {}: .four: {e}", l.no)),
+                        Ok(lines) => log.extend(lines),
+                        Err(e) => log.push(format!("line {}: .four: {e}", l.no)),
                     }
                 }
             }
             _ => {}
         }
-        scopes.extend(std::iter::repeat_n(scope, plots.len()));
-        res.plots.extend(plots);
+        prog.finish();
+        Ok(Point {
+            plots,
+            log,
+            vars: scope.vars,
+        })
+    };
+    // each plot's own parameter values, for .meas
+    let mut scopes = vec![];
+    let funcs = std::rc::Rc::new(deck.funcs.clone());
+    let mut errors: Vec<String> = vec![];
+    // points are taken in step order, whatever order they finish in; each plot is moved, never copied
+    let mut take = |r: Result<Point, String>| match r {
+        Ok(p) => {
+            res.log.extend(p.log);
+            let sc = crate::netlist::Scope {
+                vars: p.vars,
+                funcs: funcs.clone(),
+            };
+            scopes.extend(std::iter::repeat_n(sc, p.plots.len()));
+            res.plots.extend(p.plots);
+        }
+        Err(e) if !errors.contains(&e) => errors.push(e),
+        Err(_) => {}
+    };
+    let cancelled = || ctl.cancel.load(Ordering::Relaxed);
+    let mut spawned = 0;
+    if nw > 1 {
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            for w in 0..nw {
+                let (tx, next, point) = (tx.clone(), &next, &point);
+                let worker = move || {
+                    // a panicking worker stops the others mid-point, so the panic surfaces at once
+                    struct OnPanic<'a>(&'a Control);
+                    impl Drop for OnPanic<'_> {
+                        fn drop(&mut self) {
+                            if std::thread::panicking() {
+                                self.0.cancel.store(true, Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    let _guard = OnPanic(ctl);
+                    loop {
+                        let ci = next.fetch_add(1, Ordering::Relaxed);
+                        if ci >= total || cancelled() || tx.send((ci, point(ci, w))).is_err() {
+                            break;
+                        }
+                    }
+                };
+                spawned += std::thread::Builder::new()
+                    .stack_size(STACK)
+                    .spawn_scoped(s, worker)
+                    .is_ok() as usize;
+            }
+            drop(tx);
+            let (mut waiting, mut want) = (std::collections::BTreeMap::new(), 0);
+            for (ci, r) in rx {
+                waiting.insert(ci, r);
+                while let Some(r) = waiting.remove(&want) {
+                    take(r);
+                    want += 1;
+                }
+            }
+        });
     }
+    if spawned == 0 {
+        for ci in 0..total {
+            if cancelled() {
+                break;
+            }
+            take(point(ci, 0));
+        }
+    }
+    if cancelled() {
+        return Err("simulation cancelled".into());
+    }
+    if !errors.is_empty() {
+        const SHOWN: usize = 10;
+        let more = errors.len().saturating_sub(SHOWN);
+        errors.truncate(SHOWN);
+        if more > 0 {
+            errors.push(format!("and {more} more failed step(s)"));
+        }
+        return Err(errors.join("; "));
+    }
+    crate::expr::seed_random(point_seed(seed, total));
     for l in &deck.meas {
         for (p, scope) in res.plots.iter().zip(&scopes) {
             match crate::measure::measure(&l.text, p, &res.meas, scope) {
@@ -159,14 +352,29 @@ pub fn run(deck: &Deck, ctl: &Control) -> Result<SimResult, String> {
         }
     }
     for (step, name, v) in &res.meas {
-        let at = if step.is_empty() { String::new() } else { format!("   [{step}]") };
+        let at = if step.is_empty() {
+            String::new()
+        } else {
+            format!("   [{step}]")
+        };
         res.log.push(format!("{name}: {}{at}", fmt_si(*v)));
     }
-    res.plots.iter_mut().flat_map(|p| &mut p.names).for_each(|n| *n = deck.spelled(n));
-    res.log.iter_mut().filter(|l| !l.starts_with("warning")).for_each(|l| *l = deck.spelled(l));
+    res.plots
+        .iter_mut()
+        .flat_map(|p| &mut p.names)
+        .for_each(|n| *n = deck.spelled(n));
+    res.log
+        .iter_mut()
+        .filter(|l| !l.starts_with("warning"))
+        .for_each(|l| *l = deck.spelled(l));
     res.meas.iter_mut().for_each(|m| m.1 = deck.spelled(&m.1));
     let pts: usize = res.plots.iter().map(|p| p.x.len()).sum();
-    res.log.push(format!("Simulation done in {:.3} s ({} points, {} run(s))", t0.elapsed().as_secs_f64(), pts, total));
+    res.log.push(format!(
+        "Simulation done in {:.3} s ({} points, {} run(s))",
+        t0.elapsed().as_secs_f64(),
+        pts,
+        total
+    ));
     ctl.progress.store(1000, Ordering::Relaxed);
     Ok(res)
 }
@@ -192,7 +400,11 @@ pub fn integrate_psd(f: &[f64], v: &[f64]) -> f64 {
             }
             let r = (f[1] / f[0]).ln();
             let e = (s1 / s0).ln() / r + 1.0;
-            if e.abs() < 1e-10 { s0 * f[0] * r } else { s0 * f[0] / e * ((f[1] / f[0]).powf(e) - 1.0) }
+            if e.abs() < 1e-10 {
+                s0 * f[0] * r
+            } else {
+                s0 * f[0] / e * ((f[1] / f[0]).powf(e) - 1.0)
+            }
         })
         .sum()
 }
@@ -203,29 +415,68 @@ fn noise_report(p: &Plot, label: &str) -> Vec<String> {
     let tot = |k: usize| integrate_psd(&p.x, &p.re[k]);
     let on = tot(0);
     let mut out = vec![
-        format!("--- Noise {}({lo}Hz to {hi}Hz) ---", if label.is_empty() { String::new() } else { format!("{label} ") }),
+        format!(
+            "--- Noise {}({lo}Hz to {hi}Hz) ---",
+            if label.is_empty() {
+                String::new()
+            } else {
+                format!("{label} ")
+            }
+        ),
         format!("Total output noise: {}V rms", fmt_si(on.sqrt())),
         format!("Total input-referred noise: {}V rms", fmt_si(tot(1).sqrt())),
     ];
-    let mut parts: Vec<(f64, &str)> = (2..p.names.len()).map(|k| (tot(k), p.names[k].as_str())).collect();
+    let mut parts: Vec<(f64, &str)> = (2..p.names.len())
+        .map(|k| (tot(k), p.names[k].as_str()))
+        .collect();
     parts.sort_by(|a, b| b.0.total_cmp(&a.0));
     for (v, n) in parts.into_iter().filter(|(v, _)| *v > 0.0) {
-        out.push(format!("{:>20}: {}V rms ({:.3}%)", n.trim_start_matches("v(").trim_end_matches(')'), fmt_si(v.sqrt()), 100.0 * v / on));
+        out.push(format!(
+            "{:>20}: {}V rms ({:.3}%)",
+            n.trim_start_matches("v(").trim_end_matches(')'),
+            fmt_si(v.sqrt()),
+            100.0 * v / on
+        ));
     }
     out
 }
 
+/// Progress of one worker on one `.step` point; overall progress is finished points plus every
+/// worker's share of its current one.
 struct Prog<'a> {
     ctl: &'a Control,
-    base: f64,
-    span: f64,
+    slots: &'a [AtomicU32],
+    me: usize,
+    total: usize,
 }
 impl Prog<'_> {
     fn set(&self, f: f64) {
-        self.ctl.progress.store(((self.base + self.span * f.clamp(0.0, 1.0)) * 1000.0) as u32, Ordering::Relaxed);
+        self.slots[self.me].store((f.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
+        self.publish();
+    }
+    fn finish(&self) {
+        self.ctl.points_done.fetch_add(1, Ordering::Relaxed);
+        self.slots[self.me].store(0, Ordering::Relaxed);
+        self.publish();
+    }
+    fn publish(&self) {
+        let busy: u64 = self
+            .slots
+            .iter()
+            .map(|s| s.load(Ordering::Relaxed) as u64)
+            .sum();
+        let done = self.ctl.points_done.load(Ordering::Relaxed) as u64;
+        self.ctl.progress.store(
+            ((done * 1000 + busy) / self.total.max(1) as u64).min(1000) as u32,
+            Ordering::Relaxed,
+        );
     }
     fn check(&self) -> Result<(), String> {
-        if self.ctl.cancel.load(Ordering::Relaxed) { Err("simulation cancelled".into()) } else { Ok(()) }
+        if self.ctl.cancel.load(Ordering::Relaxed) {
+            Err("simulation cancelled".into())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -242,7 +493,15 @@ struct Mode {
 
 impl Mode {
     fn dc(tran: bool) -> Mode {
-        Mode { time: 0.0, dc: true, tran, a0: 0.0, b1: 0.0, src: 1.0, uic: false }
+        Mode {
+            time: 0.0,
+            dc: true,
+            tran,
+            a0: 0.0,
+            b1: 0.0,
+            src: 1.0,
+            uic: false,
+        }
     }
 }
 
@@ -264,7 +523,16 @@ impl Engine {
     fn new(c: Circuit) -> Engine {
         let n = c.n;
         let ns = c.nstate;
-        Engine { m: Matrix::new(n), x: vec![0.0; n + 1], xn: vec![0.0; n + 1], st: vec![0.0; ns], st0: vec![0.0; ns], gshunt: 0.0, force_ic: false, c }
+        Engine {
+            m: Matrix::new(n),
+            x: vec![0.0; n + 1],
+            xn: vec![0.0; n + 1],
+            st: vec![0.0; ns],
+            st0: vec![0.0; ns],
+            gshunt: 0.0,
+            force_ic: false,
+            c,
+        }
     }
 
     fn load(&mut self, md: &Mode, init: bool) -> bool {
@@ -320,7 +588,11 @@ impl Engine {
             // largest update relative to its tolerance (<= 1: converged)
             let step = (0..self.c.n).fold(0.0f64, |w, i| {
                 let (a, b) = (self.xn[i + 1], self.x[i + 1]);
-                w.max((a - b).abs() / (reltol * a.abs().max(b.abs()) + if self.c.is_current[i] { abstol } else { vntol }))
+                w.max(
+                    (a - b).abs()
+                        / (reltol * a.abs().max(b.abs())
+                            + if self.c.is_current[i] { abstol } else { vntol }),
+                )
             });
             let conv = !lim && step <= 1.0;
             std::mem::swap(&mut self.x, &mut self.xn);
@@ -373,7 +645,10 @@ impl Engine {
         while s < 1.0 {
             let ns = (s + ds).min(1.0);
             let saved = self.x.clone();
-            if self.newton(&Mode { src: ns, ..*md }, maxit, first_it).is_ok() {
+            if self
+                .newton(&Mode { src: ns, ..*md }, maxit, first_it)
+                .is_ok()
+            {
                 s = ns;
                 ds = (ds * 1.5).min(0.3);
                 first_it = false;
@@ -381,7 +656,9 @@ impl Engine {
                 self.x = saved;
                 ds /= 4.0;
                 if ds < 1e-7 {
-                    return Err(format!("DC operating point did not converge ({first}); gmin and source stepping failed"));
+                    return Err(format!(
+                        "DC operating point did not converge ({first}); gmin and source stepping failed"
+                    ));
                 }
             }
         }
@@ -417,7 +694,15 @@ impl Engine {
     fn plot(&self, kind: PlotKind, xname: &str, step: &str) -> Plot {
         let names = self.signal_names();
         let n = names.len();
-        Plot { kind, xname: xname.into(), x: vec![], names, re: vec![vec![]; n], im: vec![], step: step.into() }
+        Plot {
+            kind,
+            xname: xname.into(),
+            x: vec![],
+            names,
+            re: vec![vec![]; n],
+            im: vec![],
+            step: step.into(),
+        }
     }
 
     fn analyze(&mut self, an: &Analysis, prog: &Prog, step: &str) -> Result<Vec<Plot>, String> {
@@ -431,9 +716,24 @@ impl Engine {
             }
             Analysis::Dc(sw) => self.dc(sw, prog, step),
             Analysis::Ac(f) => self.ac(f, prog, step).map(|p| vec![p]),
-            &Analysis::Tran { tstep, tstop, tstart, tmax, uic } => self.tran(tstep, tstop, tstart, tmax, uic, prog, step).map(|p| vec![p]),
+            &Analysis::Tran {
+                tstep,
+                tstop,
+                tstart,
+                tmax,
+                uic,
+            } => self
+                .tran(tstep, tstop, tstart, tmax, uic, prog, step)
+                .map(|p| vec![p]),
             Analysis::Tf { cur, a, b, src } => self.tf(*cur, a, b, src, step).map(|p| vec![p]),
-            Analysis::Noise { out, refn, src, freqs } => self.noise(out, refn, src, freqs, prog, step).map(|p| vec![p]),
+            Analysis::Noise {
+                out,
+                refn,
+                src,
+                freqs,
+            } => self
+                .noise(out, refn, src, freqs, prog, step)
+                .map(|p| vec![p]),
         }
     }
 
@@ -453,7 +753,13 @@ impl Engine {
     /// Small-signal solve at angular frequency `w` around the operating point,
     /// driven by the sources' AC values plus 1 A injected into node `inj.0`
     /// and drawn from `inj.1`.
-    fn ac_solve(&self, m: &mut Matrix<C64>, w: f64, inj: (usize, usize), x: &mut [C64]) -> Result<(), usize> {
+    fn ac_solve(
+        &self,
+        m: &mut Matrix<C64>,
+        w: f64,
+        inj: (usize, usize),
+        x: &mut [C64],
+    ) -> Result<(), usize> {
         self.ac_load(m, w);
         m.i(inj.1, inj.0, C64::from(1.0));
         m.solve(x)
@@ -463,11 +769,23 @@ impl Engine {
     fn tf(&mut self, cur: bool, a: &str, b: &str, src: &str, step: &str) -> Result<Plot, String> {
         self.op(&Mode::dc(false), true)?;
         let idx = |n: String| self.c.names.iter().position(|s| *s == n).map(|i| i + 1);
-        let node = |n: &str| if matches!(n, "" | "0" | "gnd") { Some(0) } else { idx(format!("v({n})")) };
+        let node = |n: &str| {
+            if matches!(n, "" | "0" | "gnd") {
+                Some(0)
+            } else {
+                idx(format!("v({n})"))
+            }
+        };
         let (op, on) = if cur {
-            (idx(format!("i({a})")).ok_or(format!(".tf: '{a}' is not a voltage source"))?, 0)
+            (
+                idx(format!("i({a})")).ok_or(format!(".tf: '{a}' is not a voltage source"))?,
+                0,
+            )
         } else {
-            (node(a).ok_or(format!(".tf: unknown node '{a}'"))?, node(b).ok_or(format!(".tf: unknown node '{b}'"))?)
+            (
+                node(a).ok_or(format!(".tf: unknown node '{a}'"))?,
+                node(b).ok_or(format!(".tf: unknown node '{b}'"))?,
+            )
         };
         let ksrc = idx(format!("i({src})"));
         let (mut sn, mut out_src) = (None, false);
@@ -516,23 +834,56 @@ impl Engine {
             (false, "") => format!("v({a})"),
             _ => format!("v({a},{b})"),
         };
-        let names = vec!["transfer_function".to_string(), format!("{src}#input_impedance"), format!("output_impedance_at_{out}")];
-        Ok(Plot { kind: PlotKind::Op, xname: "tf".into(), x: vec![0.0], names, re: vec![vec![gain], vec![zin], vec![zout]], im: vec![], step: step.into() })
+        let names = vec![
+            "transfer_function".to_string(),
+            format!("{src}#input_impedance"),
+            format!("output_impedance_at_{out}"),
+        ];
+        Ok(Plot {
+            kind: PlotKind::Op,
+            xname: "tf".into(),
+            x: vec![0.0],
+            names,
+            re: vec![vec![gain], vec![zin], vec![zout]],
+            im: vec![],
+            step: step.into(),
+        })
     }
 
     /// `.noise`: output noise density of V(out, refn) and each part's contribution, by the
     /// adjoint method: one solve of the transposed small-signal system per frequency gives the
     /// transfer from every noise current (and from the input source) to the output.
-    fn noise(&mut self, out: &str, refn: &str, src: &str, freqs: &[f64], prog: &Prog, step: &str) -> Result<Plot, String> {
+    fn noise(
+        &mut self,
+        out: &str,
+        refn: &str,
+        src: &str,
+        freqs: &[f64],
+        prog: &Prog,
+        step: &str,
+    ) -> Result<Plot, String> {
         self.op(&Mode::dc(false), true)?;
         let idx = |n: String| self.c.names.iter().position(|s| *s == n).map(|i| i + 1);
-        let node = |n: &str| if matches!(n, "" | "0" | "gnd") { Some(0) } else { idx(format!("v({n})")) };
+        let node = |n: &str| {
+            if matches!(n, "" | "0" | "gnd") {
+                Some(0)
+            } else {
+                idx(format!("v({n})"))
+            }
+        };
         let op = node(out).ok_or(format!(".noise: unknown node '{out}'"))?;
         let on = node(refn).ok_or(format!(".noise: unknown node '{refn}'"))?;
         let ksrc = idx(format!("i({src})"));
-        let d = self.c.devices.iter_mut().find(|d| d.name() == src).ok_or(format!(".noise: unknown source '{src}'"))?;
+        let d = self
+            .c
+            .devices
+            .iter_mut()
+            .find(|d| d.name() == src)
+            .ok_or(format!(".noise: unknown source '{src}'"))?;
         // the forward right-hand side is never used, so the source's AC value doesn't matter
-        let (sa, sb) = d.set_ac(C64::from(1.0)).ok_or(format!(".noise: '{src}' is not an independent source"))?;
+        let (sa, sb) = d
+            .set_ac(C64::from(1.0))
+            .ok_or(format!(".noise: '{src}' is not an independent source"))?;
         // generators grouped by part (internal series resistors `Q1#rb` count for Q1)
         let (mut parts, mut gens): (Vec<String>, Vec<(usize, Noise)>) = (vec![], vec![]);
         let mut buf = vec![];
@@ -553,7 +904,15 @@ impl Engine {
         let mut y = vec![C64::default(); n + 1];
         let mut names = vec!["v(onoise)".to_string(), "v(inoise)".to_string()];
         names.extend(parts.iter().map(|p| format!("v({p})")));
-        let mut p = Plot { kind: PlotKind::Noise, xname: "frequency".into(), x: vec![], re: vec![vec![]; names.len()], names, im: vec![], step: step.into() };
+        let mut p = Plot {
+            kind: PlotKind::Noise,
+            xname: "frequency".into(),
+            x: vec![],
+            re: vec![vec![]; names.len()],
+            names,
+            im: vec![],
+            step: step.into(),
+        };
         let mut dev = vec![0.0; parts.len()];
         for (fi, &f) in freqs.iter().enumerate() {
             prog.check()?;
@@ -561,7 +920,13 @@ impl Engine {
             m.transpose_into(&mut t);
             t.rhs(op, C64::from(1.0));
             t.rhs(on, C64::from(-1.0));
-            t.solve(&mut y).map_err(|k| format!(".noise: singular matrix at {} (f={})", self.c.names[k - 1], fmt_si(f)))?;
+            t.solve(&mut y).map_err(|k| {
+                format!(
+                    ".noise: singular matrix at {} (f={})",
+                    self.c.names[k - 1],
+                    fmt_si(f)
+                )
+            })?;
             // unit input: a voltage source drives its branch row, a current source flows sa → sb
             let gain = match ksrc {
                 Some(k) => y[k],
@@ -587,13 +952,29 @@ impl Engine {
     }
 
     fn set_src(&mut self, name: &str, v: f64) -> Result<(), String> {
-        let d = self.c.devices.iter_mut().find(|d| d.name() == name).ok_or(format!(".dc: unknown source '{name}'"))?;
-        if d.set_dc(v) { Ok(()) } else { Err(format!(".dc: '{name}' is not an independent source")) }
+        let d = self
+            .c
+            .devices
+            .iter_mut()
+            .find(|d| d.name() == name)
+            .ok_or(format!(".dc: unknown source '{name}'"))?;
+        if d.set_dc(v) {
+            Ok(())
+        } else {
+            Err(format!(".dc: '{name}' is not an independent source"))
+        }
     }
 
-    fn dc(&mut self, sw: &[(String, Vec<f64>)], prog: &Prog, step: &str) -> Result<Vec<Plot>, String> {
+    fn dc(
+        &mut self,
+        sw: &[(String, Vec<f64>)],
+        prog: &Prog,
+        step: &str,
+    ) -> Result<Vec<Plot>, String> {
         let (inner, iv) = (&sw[0].0, &sw[0].1);
-        let outer: Vec<Option<f64>> = sw.get(1).map_or(vec![None], |s| s.1.iter().map(|&v| Some(v)).collect());
+        let outer: Vec<Option<f64>> = sw
+            .get(1)
+            .map_or(vec![None], |s| s.1.iter().map(|&v| Some(v)).collect());
         let mut plots = vec![];
         let total = (outer.len() * iv.len()) as f64;
         let mut done = 0.0;
@@ -601,7 +982,9 @@ impl Engine {
             let mut label = step.to_string();
             if let Some(v) = ov {
                 self.set_src(&sw[1].0, v)?;
-                label = format!("{label} {}={}", sw[1].0, fmt_si(v)).trim().to_string();
+                label = format!("{label} {}={}", sw[1].0, fmt_si(v))
+                    .trim()
+                    .to_string();
             }
             let mut p = self.plot(PlotKind::Dc, inner, &label);
             for (k, &v) in iv.iter().enumerate() {
@@ -609,7 +992,8 @@ impl Engine {
                 self.set_src(inner, v)?;
                 let md = Mode::dc(false);
                 if k == 0 || self.newton(&md, self.c.opts.itl1, false).is_err() {
-                    self.op(&md, k == 0).map_err(|e| format!("{e} at {inner}={}", fmt_si(v)))?;
+                    self.op(&md, k == 0)
+                        .map_err(|e| format!("{e} at {inner}={}", fmt_si(v)))?;
                 }
                 p.x.push(v);
                 self.record(&mut p.re);
@@ -632,7 +1016,13 @@ impl Engine {
         for (fi, &f) in freqs.iter().enumerate() {
             prog.check()?;
             let w = 2.0 * std::f64::consts::PI * f;
-            self.ac_solve(&mut mc, w, (0, 0), &mut xc).map_err(|k| format!("AC: singular matrix at {} (f={})", self.c.names[k - 1], fmt_si(f)))?;
+            self.ac_solve(&mut mc, w, (0, 0), &mut xc).map_err(|k| {
+                format!(
+                    "AC: singular matrix at {} (f={})",
+                    self.c.names[k - 1],
+                    fmt_si(f)
+                )
+            })?;
             p.x.push(f);
             let mut k = 0;
             for &(_, i) in &self.c.out_nodes {
@@ -655,9 +1045,22 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn tran(&mut self, tstep: f64, tstop: f64, tstart: f64, tmax: f64, uic: bool, prog: &Prog, step: &str) -> Result<Plot, String> {
+    fn tran(
+        &mut self,
+        tstep: f64,
+        tstop: f64,
+        tstart: f64,
+        tmax: f64,
+        uic: bool,
+        prog: &Prog,
+        step: &str,
+    ) -> Result<Plot, String> {
         let o = self.c.opts.clone();
-        let mut tmax = if tmax > 0.0 { tmax } else { (tstop - tstart) / 250.0 };
+        let mut tmax = if tmax > 0.0 {
+            tmax
+        } else {
+            (tstop - tstart) / 250.0
+        };
         if o.maxstep > 0.0 {
             tmax = tmax.min(o.maxstep);
         }
@@ -670,7 +1073,13 @@ impl Engine {
             for d in &self.c.devices {
                 d.init_x(&mut self.x);
             }
-            self.load(&Mode { uic: true, ..Mode::dc(true) }, false);
+            self.load(
+                &Mode {
+                    uic: true,
+                    ..Mode::dc(true)
+                },
+                false,
+            );
         } else {
             self.force_ic = !self.c.ics.is_empty();
             let r = self.op(&Mode::dc(true), true);
@@ -695,7 +1104,8 @@ impl Engine {
         }
         let n = self.c.n;
         let dtmin = (tstop * 1e-14).max(1e-18);
-        let mut dt = ((tstop / 100.0).min(if tstep > 0.0 { tstep } else { tstop }) / 10.0).min(tmax);
+        let mut dt =
+            ((tstop / 100.0).min(if tstep > 0.0 { tstep } else { tstop }) / 10.0).min(tmax);
         let mut t = 0.0;
         let mut bi = 0;
         // history of accepted points, most recent first
@@ -717,7 +1127,15 @@ impl Engine {
                 h = (bp - t) / 2.0;
             }
             let be = hist.len() < 3;
-            let md = Mode { time: t + h, dc: false, tran: true, a0: if be { 1.0 / h } else { 2.0 / h }, b1: if be { 0.0 } else { 1.0 }, src: 1.0, uic: false };
+            let md = Mode {
+                time: t + h,
+                dc: false,
+                tran: true,
+                a0: if be { 1.0 / h } else { 2.0 / h },
+                b1: if be { 0.0 } else { 1.0 },
+                src: 1.0,
+                uic: false,
+            };
             saved.copy_from_slice(&self.x);
             let iters = match self.newton(&md, o.itl4, false) {
                 Ok(i) => i,
@@ -756,7 +1174,11 @@ impl Engine {
                 let mut r: f64 = 0.0;
                 for i in 1..=n {
                     let xc = self.x[i];
-                    let abs = if self.c.is_current[i - 1] { o.abstol * 1e3 } else { o.vntol };
+                    let abs = if self.c.is_current[i - 1] {
+                        o.abstol * 1e3
+                    } else {
+                        o.vntol
+                    };
                     let tol = o.trtol * (o.reltol * xc.abs().max(x0[i].abs()) + abs);
                     r = r.max(kappa * (xc - xp[i]).abs() / tol);
                 }
@@ -765,7 +1187,11 @@ impl Engine {
                     dt = h * (0.9 * r.powf(-1.0 / order)).max(0.2);
                     continue;
                 }
-                grow = if r > 0.0 { (0.9 * r.powf(-1.0 / order)).clamp(0.5, 2.0) } else { 2.0 };
+                grow = if r > 0.0 {
+                    (0.9 * r.powf(-1.0 / order)).clamp(0.5, 2.0)
+                } else {
+                    2.0
+                };
             }
             if iters > o.itl4 / 2 {
                 grow = grow.min(1.0);

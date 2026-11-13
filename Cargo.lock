@@ -3229,6 +3229,7 @@ dependencies = [
  "flate2",
  "icu_normalizer",
  "rfd",
+ "ring",
  "serde",
  "serde_json",
  "sys-locale",

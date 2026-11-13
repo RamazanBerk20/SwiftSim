@@ -13,10 +13,11 @@ list and the "Not yet supported" section (the roadmap is whatever is listed ther
 | `src/solver.rs` | MNA matrix + LU: dense ≤ 32 unknowns, sparse Gilbert-Peierls LU above (pattern learned from stamps, refactor reuses pivots); complex for AC; transpose for noise |
 | `src/devices.rs` | `Device` trait: `load` (DC/tran Newton stamp), `load_ac`, `noise`, `currents`; all device models |
 | `src/netlist.rs` | LTspice-dialect parser, `.include/.lib` (incl. LTspice's installed library), `.subckt` flattening, models, built-in model library, `.step`/`.param` |
-| `src/sim.rs` | `.op .dc .ac .tran .tf .noise`, `.step` orchestration, OP/noise/.four reports |
+| `src/sim.rs` | `.op .dc .ac .tran .tf .noise`, `.step` orchestration (parallel points, see below), OP/noise/.four reports |
+| `src/raw.rs` | LTspice-compatible binary `.raw` export (`-b --raw`, File menu, MCP `simulate` `raw`); `tests/raw.rs` reads it back with an independent reader |
 | `src/measure.rs` | `.meas`, `.four`, plot-trace expressions |
 | `src/main.rs` | CLI: GUI by default, `-b file` batch mode, `--mcp` server |
-| `src/mcp.rs` | MCP server on stdio for coding agents: `simulate`, `schematic_netlist`, `open_in_gui` |
+| `src/mcp.rs` | MCP server on stdio for coding agents: `simulate`, `schematic_netlist`, `open_in_gui`, `gui_status`, and `gui_netlist`/`gui_run`/`gui_results`/`gui_set_params`/`gui_last_error` that drive an open window |
 | `src/gui/mod.rs` | app shell, menus, panels, simulation thread, examples, file I/O |
 | `src/gui/schematic.rs` | schematic model, symbols/pins, netlister, file format + `upgrade()` |
 | `src/gui/editor.rs` | canvas: tools, selection, wiring, undo, probing, drawing |
@@ -62,11 +63,43 @@ Rust 1.89+ (edition 2024; `File::try_lock`). The release profile uses thin LTO.
   than the panel makes it creep. The results panel pins its content to the panel rect; keep
   that pattern for any resizable panel whose content fills it.
 - **Never block the UI thread:** simulations and the update check run on threads and report
-  over channels; the app calls `request_repaint` when they finish.
+  over channels; the app calls `request_repaint` when they finish. Engine threads use
+  `sim::STACK`. App state lives in explicit state machines (`gui/state.rs`: document, simulation
+  job, dialogs; `update::Updater`; `editor::Tool`; `mcp::Requests`): change them through their
+  transition functions, and replace the document only via `App::replace_document`. Each window
+  writes `window-<pid>.json` to the config folder for the MCP `gui_status` tool.
+- **`.step` points run in parallel** (`sim::run`): scoped threads (`sim::workers`: cores − 1, capped by
+  `SWIFTSIM_JOBS`, or `Control::jobs`), each building its own circuit; results are taken in step
+  order and moved, never copied. Output must stay bit-for-bit equal to a serial run
+  (`parallel_step_matches_serial_exactly`); every failing point is reported. Anything an engine
+  thread shares must be `Sync` (no `Rc`/thread-locals carrying results between points). Monte Carlo
+  draws come from `expr::seed_random(point_seed(run seed, point index))` at the start of each point,
+  never from the thread: `Control::seed` / `SWIFTSIM_SEED` repeat a run.
+- **Live parameters** (`state::Live`, Parameters panel): slider values override numeric `.param`s
+  through `netlist::set_params` on the netlist text of a run, never the schematic until *Apply*. A
+  new value while a run is in flight cancels it (`SimEvent::Cancel`) and sets `Live::rerun`; the
+  next run starts when the cancelled one is done, so at most one waits. `replace_document` clears it.
+- **Agents driving a window**: `gui_*` MCP requests are files `req-<pid>-<id>.json` / `resp-…` in
+  `session::ipc_dir` (`$XDG_RUNTIME_DIR/swiftsim` 0700, files 0600; `%APPDATA%\SwiftSim\ipc` on
+  Windows, not verified there), read by a thread in the window and answered in `App::agent`. Each request
+  carries a `deadline_ms` (the window drops it unexecuted after that), `gui_run`/`gui_set_params`
+  carry the document `generation` the agent read (refused on mismatch), and a window removes its
+  own request files at start and exit. An agent
+  request never saves, opens, closes or replaces the document, and is refused while a modal is open or
+  a mouse button is down; the toolbar shows "Driven by an agent" for 15 s after each request. Never
+  add a network listener.
+- **Untrusted input never crashes:** expressions are depth-limited (`expr::MAX_DEPTH`), point and
+  harmonic counts and subcircuit expansion are capped; add a fixture to `tests/fixtures/audit/`
+  for any new crash.
 - **Updates** (`update.rs`): errors from the automatic check stay silent. Release candidates are
   offered newer candidates; stable builds only stable releases. *Install update* only takes files
-  from this repo's release page, checks the size, runs the new program's `--help` and requires the
-  new tag in its output before replacing anything. Only stamped release builds (`SWIFTSIM_VERSION`)
+  from this repo's release page, checks the size and SHA-256 against the release's `SHA256SUMS`
+  (published by `release.yml`) before running anything, then requires `--help`'s first line to be
+  exactly `SwiftSim <tag>`. The replaced program stays as `<file>.old` until the new one has run for
+  twice `RESTART_GRACE` (then `cleanup()`; never at startup), and "Restart now" puts it back if the
+  new one exits with an error before that.
+  `update::Updater` is the one state machine for check/install/restart. The tools `release.yml`
+  downloads are pinned to numbered releases and checked against `packaging/linux/tools.sha256`. Only stamped release builds (`SWIFTSIM_VERSION`)
   outside `/usr` update themselves. The asset names in `plan()` must match `release.yml` and
   `package.sh`; the tarball's layout must match `unpack()`.
 - **UI text goes through `i18n`.** The English text is the key: `tr("Save")`, `trf("Saved {}", &[&p])`,
@@ -113,6 +146,6 @@ the `Co-Authored-By:` line your harness asks for. Commit or push only when the m
 ## Where the app keeps data
 
 Config folder: `%APPDATA%\SwiftSim` or `$XDG_CONFIG_HOME`/`~/.config/swiftsim`: `settings.ron`
-(eframe persistence), `recent.txt`, `ltspice-lib.txt`, `recovery-<pid>.json/.lock`.
+(eframe persistence), `recent.txt`, `ltspice-lib.txt`, `recovery-<pid>.json/.lock`, `window-<pid>.json`.
 LTspice's model library is read at run time from an installed LTspice (auto-detected, or the
 folder chosen under Simulate) and is never copied into the repo.

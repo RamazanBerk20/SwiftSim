@@ -1,17 +1,49 @@
 //! Schematic canvas: tools, selection, editing, probing, drawing.
 
-use eframe::egui;
 use super::schematic::*;
-use egui::{Align2, Color32, CornerRadius, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Vec2};
+use eframe::egui;
+use egui::{
+    Align2, Color32, CornerRadius, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Shape,
+    Stroke, StrokeKind, Vec2,
+};
 use std::collections::{HashMap, HashSet};
 
+/// The canvas's interaction mode, with the state that only exists in that mode.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Tool {
     Select,
-    Wire,
-    Place(Kind),
+    /// `from`: the start of the wire being drawn.
+    Wire {
+        from: Option<P>,
+    },
+    /// The part follows the pointer, turned and mirrored as it will be placed.
+    Place {
+        kind: Kind,
+        rot: u8,
+        mirror: bool,
+    },
     Text,
     Probe,
+}
+
+impl Tool {
+    pub const WIRE: Tool = Tool::Wire { from: None };
+
+    pub fn place(kind: Kind) -> Tool {
+        Tool::Place {
+            kind,
+            rot: 0,
+            mirror: false,
+        }
+    }
+
+    /// The same tool, whatever its in-progress state (for toolbar highlighting).
+    pub fn same(self, o: Tool) -> bool {
+        match (self, o) {
+            (Tool::Place { kind: a, .. }, Tool::Place { kind: b, .. }) => a == b,
+            _ => std::mem::discriminant(&self) == std::mem::discriminant(&o),
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -40,8 +72,14 @@ enum Hit {
 
 enum Drag {
     None,
-    Move { last: P, moved: bool, ends: Vec<(usize, bool)> },
-    Boxing { start: Pos2 },
+    Move {
+        last: P,
+        moved: bool,
+        ends: Vec<(usize, bool)>,
+    },
+    Boxing {
+        start: Pos2,
+    },
 }
 
 struct Pal {
@@ -94,13 +132,10 @@ pub struct Editor {
     offset: Vec2,
     zoom: f32,
     drag: Drag,
-    wire_from: Option<P>,
-    place_rot: u8,
-    place_mirror: bool,
     undo: Vec<Schematic>,
     redo: Vec<Schematic>,
     clip: Option<Schematic>,
-    pub dirty: bool,
+    /// Bumped by every edit; the app's document compares it with the saved version.
     version: u64,
     cache: Option<(u64, Netlist)>,
     text_rects: Vec<Rect>,
@@ -123,13 +158,9 @@ impl Default for Editor {
             offset: Vec2::new(300.0, 200.0),
             zoom: 16.0,
             drag: Drag::None,
-            wire_from: None,
-            place_rot: 0,
-            place_mirror: false,
             undo: vec![],
             redo: vec![],
             clip: None,
-            dirty: false,
             version: 0,
             cache: None,
             text_rects: vec![],
@@ -146,19 +177,31 @@ fn dist_seg(p: [f32; 2], a: P, b: P) -> f32 {
     let (ax, ay, bx, by) = (a[0] as f32, a[1] as f32, b[0] as f32, b[1] as f32);
     let (dx, dy) = (bx - ax, by - ay);
     let l2 = dx * dx + dy * dy;
-    let t = if l2 == 0.0 { 0.0 } else { (((p[0] - ax) * dx + (p[1] - ay) * dy) / l2).clamp(0.0, 1.0) };
+    let t = if l2 == 0.0 {
+        0.0
+    } else {
+        (((p[0] - ax) * dx + (p[1] - ay) * dy) / l2).clamp(0.0, 1.0)
+    };
     ((p[0] - ax - t * dx).powi(2) + (p[1] - ay - t * dy).powi(2)).sqrt()
 }
 
 impl Editor {
     pub fn load(&mut self, sch: Schematic) {
-        *self = Editor { sch, fit_next: true, show_op: self.show_op, ..Default::default() };
+        *self = Editor {
+            sch,
+            fit_next: true,
+            show_op: self.show_op,
+            ..Default::default()
+        };
     }
 
     pub fn changed(&mut self) {
         self.version += 1;
-        self.dirty = true;
         self.op_values.clear();
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     pub fn checkpoint(&mut self) {
@@ -209,8 +252,8 @@ impl Editor {
     }
 
     pub fn rotate(&mut self) {
-        if let Tool::Place(_) = self.tool {
-            self.place_rot = (self.place_rot + 1) % 4;
+        if let Tool::Place { rot, .. } = &mut self.tool {
+            *rot = (*rot + 1) % 4;
         } else if !self.sel.comps.is_empty() {
             self.checkpoint();
             for &i in &self.sel.comps {
@@ -221,8 +264,8 @@ impl Editor {
     }
 
     pub fn mirror(&mut self) {
-        if let Tool::Place(_) = self.tool {
-            self.place_mirror = !self.place_mirror;
+        if let Tool::Place { mirror, .. } = &mut self.tool {
+            *mirror = !*mirror;
         } else if !self.sel.comps.is_empty() {
             self.checkpoint();
             for &i in &self.sel.comps {
@@ -267,7 +310,10 @@ impl Editor {
         }
         for w in c.wires {
             self.sel.wires.insert(self.sch.wires.len());
-            self.sch.wires.push(Wire { a: add(w.a), b: add(w.b) });
+            self.sch.wires.push(Wire {
+                a: add(w.a),
+                b: add(w.b),
+            });
         }
         for mut t in c.texts {
             t.pos = add(t.pos);
@@ -277,7 +323,12 @@ impl Editor {
         // shift the clipboard so repeated pastes cascade
         if let Some(cl) = &mut self.clip {
             cl.comps.iter_mut().for_each(|c| c.pos = add(c.pos));
-            cl.wires.iter_mut().for_each(|w| *w = Wire { a: add(w.a), b: add(w.b) });
+            cl.wires.iter_mut().for_each(|w| {
+                *w = Wire {
+                    a: add(w.a),
+                    b: add(w.b),
+                }
+            });
             cl.texts.iter_mut().for_each(|t| t.pos = add(t.pos));
         }
         self.changed();
@@ -287,14 +338,16 @@ impl Editor {
         self.fit_next = true;
     }
 
+    /// Switches mode; whatever was in progress (a wire, a drag) ends.
     pub fn set_tool(&mut self, t: Tool) {
         // rotation sticks while placing more of the same part, resets on a different one
-        if t != self.tool {
-            self.place_rot = 0;
-            self.place_mirror = false;
+        if !(matches!(t, Tool::Place { .. }) && t.same(self.tool)) {
+            self.tool = t;
         }
-        self.tool = t;
-        self.wire_from = None;
+        if let Tool::Wire { from } = &mut self.tool {
+            *from = None;
+        }
+        self.drag = Drag::None;
     }
 
     fn to_screen(&self, r: Rect, p: [f32; 2]) -> Pos2 {
@@ -310,12 +363,17 @@ impl Editor {
 
     fn hit(&self, w: [f32; 2], r: Rect) -> Hit {
         let sp = self.to_screen(r, w);
-        if let Some(i) = self.text_rects.iter().position(|t| t.expand(2.0).contains(sp)) {
+        if let Some(i) = self
+            .text_rects
+            .iter()
+            .position(|t| t.expand(2.0).contains(sp))
+        {
             return Hit::Text(i);
         }
         for (i, c) in self.sch.comps.iter().enumerate().rev() {
             let (a, b) = c.world_bbox();
-            if w[0] >= a[0] - 0.2 && w[0] <= b[0] + 0.2 && w[1] >= a[1] - 0.2 && w[1] <= b[1] + 0.2 {
+            if w[0] >= a[0] - 0.2 && w[0] <= b[0] + 0.2 && w[1] >= a[1] - 0.2 && w[1] <= b[1] + 0.2
+            {
                 return Hit::Comp(i);
             }
         }
@@ -331,15 +389,26 @@ impl Editor {
     }
 
     fn is_connection(&self, p: P) -> bool {
-        self.sch.comps.iter().any(|c| c.pin_pos().contains(&p)) || self.sch.wires.iter().any(|w| on_segment(p, w))
+        self.sch.comps.iter().any(|c| c.pin_pos().contains(&p))
+            || self.sch.wires.iter().any(|w| on_segment(p, w))
     }
 
     /// Net under a world point (wire or pin), if any.
     fn net_at(&mut self, w: [f32; 2]) -> Option<String> {
         let g = Self::snap(w);
         let tol = (6.0 / self.zoom).max(0.25);
-        let wire = self.sch.wires.iter().find(|wi| dist_seg(w, wi.a, wi.b) < tol).map(|wi| wi.a);
-        let pin = self.sch.comps.iter().flat_map(|c| c.pin_pos()).find(|p| *p == g && (w[0] - g[0] as f32).hypot(w[1] - g[1] as f32) < 0.4);
+        let wire = self
+            .sch
+            .wires
+            .iter()
+            .find(|wi| dist_seg(w, wi.a, wi.b) < tol)
+            .map(|wi| wi.a);
+        let pin = self
+            .sch
+            .comps
+            .iter()
+            .flat_map(|c| c.pin_pos())
+            .find(|p| *p == g && (w[0] - g[0] as f32).hypot(w[1] - g[1] as f32) < 0.4);
         let p = wire.or(pin)?;
         self.netlist().nets.get(&p).cloned()
     }
@@ -359,9 +428,21 @@ impl Editor {
 
     pub fn place_text(&mut self, text: &str) {
         self.checkpoint();
-        let y = self.sch.comps.iter().map(|c| c.world_bbox().1[1] as i32).chain(self.sch.wires.iter().map(|w| w.a[1].max(w.b[1]))).chain(self.sch.texts.iter().map(|t| t.pos[1] + 2)).max().unwrap_or(0) + 3;
+        let y = self
+            .sch
+            .comps
+            .iter()
+            .map(|c| c.world_bbox().1[1] as i32)
+            .chain(self.sch.wires.iter().map(|w| w.a[1].max(w.b[1])))
+            .chain(self.sch.texts.iter().map(|t| t.pos[1] + 2))
+            .max()
+            .unwrap_or(0)
+            + 3;
         let x = self.sch.comps.iter().map(|c| c.pos[0]).min().unwrap_or(0);
-        self.sch.texts.push(Text { pos: [x, y], text: text.into() });
+        self.sch.texts.push(Text {
+            pos: [x, y],
+            text: text.into(),
+        });
         self.changed();
     }
 
@@ -370,7 +451,8 @@ impl Editor {
             return;
         }
         let cmd = |k: Key| ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, k));
-        let cmd_shift = |k: Key| ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, k));
+        let cmd_shift =
+            |k: Key| ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, k));
         if cmd_shift(Key::Z) || cmd(Key::Y) {
             self.redo();
         }
@@ -402,8 +484,11 @@ impl Editor {
         }
         let plain = |k: Key| ui.input_mut(|i| i.consume_key(Modifiers::NONE, k));
         if plain(Key::Escape) {
-            if self.wire_from.is_some() {
-                self.wire_from = None;
+            if let Tool::Wire {
+                from: from @ Some(_),
+            } = &mut self.tool
+            {
+                *from = None;
             } else if self.tool != Tool::Select {
                 self.set_tool(Tool::Select);
             } else {
@@ -420,16 +505,16 @@ impl Editor {
             if let Some(s) = k.shortcut() {
                 if let Some(key) = Key::from_name(s) {
                     if plain(key) {
-                        self.set_tool(Tool::Place(k));
+                        self.set_tool(Tool::place(k));
                     }
                 }
             }
         }
         if plain(Key::W) || plain(Key::F3) {
-            self.set_tool(Tool::Wire);
+            self.set_tool(Tool::WIRE);
         }
         if plain(Key::F4) {
-            self.set_tool(Tool::Place(Kind::Label));
+            self.set_tool(Tool::place(Kind::Label));
         }
         if plain(Key::T) || plain(Key::S) || plain(Key::Period) {
             self.set_tool(Tool::Text);
@@ -508,34 +593,48 @@ impl Editor {
         let shift = ui.input(|i| i.modifiers.shift);
         match self.tool {
             Tool::Select => self.select_input(&resp, rect, hw, hg, shift),
-            Tool::Wire => {
+            Tool::Wire { from } => {
+                let mut next = from;
                 if let Some(g) = hg {
                     if resp.double_clicked() {
-                        self.wire_from = None;
+                        next = None;
                     } else if resp.clicked() {
-                        match self.wire_from {
-                            None => self.wire_from = Some(g),
+                        match from {
+                            None => next = Some(g),
                             Some(f) if f != g => {
                                 let end = self.is_connection(g);
                                 self.checkpoint();
                                 self.add_wire(f, g);
                                 self.changed();
-                                self.wire_from = if end { None } else { Some(g) };
+                                next = if end { None } else { Some(g) };
                             }
                             _ => {}
                         }
                     }
                 }
                 if resp.secondary_clicked() {
-                    self.wire_from = None;
+                    next = None;
                 }
+                self.tool = Tool::Wire { from: next };
             }
-            Tool::Place(k) => {
+            Tool::Place {
+                kind: k,
+                rot,
+                mirror,
+            } => {
                 if resp.clicked() {
                     if let Some(g) = hg {
                         self.checkpoint();
                         let name = self.sch.next_name(k);
-                        self.sch.comps.push(Component { kind: k, name, value: k.default_value().into(), pos: g, rot: self.place_rot, mirror: self.place_mirror, pins: vec![] });
+                        self.sch.comps.push(Component {
+                            kind: k,
+                            name,
+                            value: k.default_value().into(),
+                            pos: g,
+                            rot,
+                            mirror,
+                            pins: vec![],
+                        });
                         self.changed();
                     }
                 }
@@ -547,7 +646,10 @@ impl Editor {
                 if resp.clicked() {
                     if let Some(g) = hg {
                         self.checkpoint();
-                        self.sch.texts.push(Text { pos: g, text: ".tran 10m".into() });
+                        self.sch.texts.push(Text {
+                            pos: g,
+                            text: ".tran 10m".into(),
+                        });
                         self.sel.clear();
                         self.sel.texts.insert(self.sch.texts.len() - 1);
                         self.changed();
@@ -586,7 +688,14 @@ impl Editor {
         self.draw(ui, rect, hw, hg);
     }
 
-    fn select_input(&mut self, resp: &egui::Response, rect: Rect, hw: Option<[f32; 2]>, hg: Option<P>, shift: bool) {
+    fn select_input(
+        &mut self,
+        resp: &egui::Response,
+        rect: Rect,
+        hw: Option<[f32; 2]>,
+        hg: Option<P>,
+        shift: bool,
+    ) {
         if resp.drag_started_by(PointerButton::Primary) {
             let press = resp.interact_pointer_pos().unwrap_or_default();
             let w = self.to_world(rect, press);
@@ -615,8 +724,18 @@ impl Editor {
                     };
                 }
                 // wires attached to moving pins / wire ends follow (rubber band)
-                let mut anchors: HashSet<P> = self.sel.comps.iter().flat_map(|&i| self.sch.comps[i].pin_pos()).collect();
-                anchors.extend(self.sel.wires.iter().flat_map(|&i| [self.sch.wires[i].a, self.sch.wires[i].b]));
+                let mut anchors: HashSet<P> = self
+                    .sel
+                    .comps
+                    .iter()
+                    .flat_map(|&i| self.sch.comps[i].pin_pos())
+                    .collect();
+                anchors.extend(
+                    self.sel
+                        .wires
+                        .iter()
+                        .flat_map(|&i| [self.sch.wires[i].a, self.sch.wires[i].b]),
+                );
                 let mut ends = vec![];
                 for (i, wi) in self.sch.wires.iter().enumerate() {
                     if self.sel.wires.contains(&i) {
@@ -629,7 +748,11 @@ impl Editor {
                         ends.push((i, false));
                     }
                 }
-                self.drag = Drag::Move { last: Self::snap(w), moved: false, ends };
+                self.drag = Drag::Move {
+                    last: Self::snap(w),
+                    moved: false,
+                    ends,
+                };
             }
         }
         if resp.dragged_by(PointerButton::Primary) {
@@ -657,9 +780,7 @@ impl Editor {
                         let w = &mut self.sch.wires[i];
                         mv(if a { &mut w.a } else { &mut w.b });
                     }
-                    self.version += 1;
-                    self.dirty = true;
-                    self.op_values.clear();
+                    self.changed();
                 }
             }
         }
@@ -667,8 +788,13 @@ impl Editor {
             if let Drag::Boxing { start } = self.drag {
                 if let Some(end) = resp.interact_pointer_pos().or(resp.hover_pos()) {
                     let (a, b) = (self.to_world(rect, start), self.to_world(rect, end));
-                    let (lo, hi) = ([a[0].min(b[0]), a[1].min(b[1])], [a[0].max(b[0]), a[1].max(b[1])]);
-                    let inside = |p: [f32; 2]| p[0] >= lo[0] && p[0] <= hi[0] && p[1] >= lo[1] && p[1] <= hi[1];
+                    let (lo, hi) = (
+                        [a[0].min(b[0]), a[1].min(b[1])],
+                        [a[0].max(b[0]), a[1].max(b[1])],
+                    );
+                    let inside = |p: [f32; 2]| {
+                        p[0] >= lo[0] && p[0] <= hi[0] && p[1] >= lo[1] && p[1] <= hi[1]
+                    };
                     for (i, c) in self.sch.comps.iter().enumerate() {
                         let (a, b) = c.world_bbox();
                         if inside(a) && inside(b) {
@@ -676,7 +802,9 @@ impl Editor {
                         }
                     }
                     for (i, w) in self.sch.wires.iter().enumerate() {
-                        if inside([w.a[0] as f32, w.a[1] as f32]) && inside([w.b[0] as f32, w.b[1] as f32]) {
+                        if inside([w.a[0] as f32, w.a[1] as f32])
+                            && inside([w.b[0] as f32, w.b[1] as f32])
+                        {
                             self.sel.wires.insert(i);
                         }
                     }
@@ -714,10 +842,19 @@ impl Editor {
         painter.rect_filled(rect, CornerRadius::ZERO, p.bg);
         let z = self.zoom;
         // grid
-        let step = if z < 6.0 { 4 } else if z < 10.0 { 2 } else { 1 };
+        let step = if z < 6.0 {
+            4
+        } else if z < 10.0 {
+            2
+        } else {
+            1
+        };
         let a = self.to_world(rect, rect.min);
         let b = self.to_world(rect, rect.max);
-        let (x0, y0) = ((a[0] / step as f32).floor() as i32 * step, (a[1] / step as f32).floor() as i32 * step);
+        let (x0, y0) = (
+            (a[0] / step as f32).floor() as i32 * step,
+            (a[1] / step as f32).floor() as i32 * step,
+        );
         let r = if z > 20.0 { 1.4 } else { 1.0 };
         let mut y = y0;
         while (y as f32) <= b[1] {
@@ -735,10 +872,13 @@ impl Editor {
         };
         let nl_nets = self.netlist().nets.clone();
         let degree = self.netlist().degree.clone();
+        let pins = self.netlist().pins.clone();
         let sw = (z * 0.12).clamp(1.2, 3.0);
         // wires
         for (i, w) in self.sch.wires.iter().enumerate() {
-            let hl = probe_net.as_ref().is_some_and(|n| nl_nets.get(&w.a) == Some(n));
+            let hl = probe_net
+                .as_ref()
+                .is_some_and(|n| nl_nets.get(&w.a) == Some(n));
             let col = if self.sel.wires.contains(&i) {
                 p.sel
             } else if hl {
@@ -747,7 +887,10 @@ impl Editor {
                 p.wire
             };
             painter.line_segment(
-                [self.to_screen(rect, [w.a[0] as f32, w.a[1] as f32]), self.to_screen(rect, [w.b[0] as f32, w.b[1] as f32])],
+                [
+                    self.to_screen(rect, [w.a[0] as f32, w.a[1] as f32]),
+                    self.to_screen(rect, [w.b[0] as f32, w.b[1] as f32]),
+                ],
                 Stroke::new(if hl { sw * 1.8 } else { sw }, col),
             );
         }
@@ -755,9 +898,14 @@ impl Editor {
             let s = self.to_screen(rect, [pt[0] as f32, pt[1] as f32]);
             if *d >= 3 {
                 painter.circle_filled(s, (z * 0.22).clamp(2.5, 6.0), p.wire);
-            } else if *d == 1 && self.sch.comps.iter().any(|c| c.kind != Kind::Ground && c.kind != Kind::Label && c.pin_pos().contains(pt)) {
+            } else if *d == 1 && pins.contains(pt) {
                 let h = (z * 0.14).clamp(2.0, 4.0);
-                painter.rect_stroke(Rect::from_center_size(s, Vec2::splat(h * 2.0)), CornerRadius::ZERO, Stroke::new(1.0, p.pin), StrokeKind::Middle);
+                painter.rect_stroke(
+                    Rect::from_center_size(s, Vec2::splat(h * 2.0)),
+                    CornerRadius::ZERO,
+                    Stroke::new(1.0, p.pin),
+                    StrokeKind::Middle,
+                );
             }
         }
         // components
@@ -782,17 +930,45 @@ impl Editor {
             self.draw_comp(&painter, rect, c, col, sw, &font, &p);
         }
         // ghost of the part being placed
-        if let (Tool::Place(k), Some(g)) = (self.tool, hg) {
-            let ghost = Component { kind: k, name: String::new(), value: k.default_value().into(), pos: g, rot: self.place_rot, mirror: self.place_mirror, pins: vec![] };
-            self.draw_comp(&painter, rect, &ghost, p.sel.gamma_multiply(0.6), sw, &font, &p);
+        if let (
+            Tool::Place {
+                kind: k,
+                rot,
+                mirror,
+            },
+            Some(g),
+        ) = (self.tool, hg)
+        {
+            let ghost = Component {
+                kind: k,
+                name: String::new(),
+                value: k.default_value().into(),
+                pos: g,
+                rot,
+                mirror,
+                pins: vec![],
+            };
+            self.draw_comp(
+                &painter,
+                rect,
+                &ghost,
+                p.sel.gamma_multiply(0.6),
+                sw,
+                &font,
+                &p,
+            );
         }
         // wire preview
-        if let (Tool::Wire, Some(f), Some(g)) = (self.tool, self.wire_from, hg) {
+        if let (Tool::Wire { from: Some(f) }, Some(g)) = (self.tool, hg) {
             let m = [g[0], f[1]];
-            let pts = vec![self.to_screen(rect, [f[0] as f32, f[1] as f32]), self.to_screen(rect, [m[0] as f32, m[1] as f32]), self.to_screen(rect, [g[0] as f32, g[1] as f32])];
+            let pts = vec![
+                self.to_screen(rect, [f[0] as f32, f[1] as f32]),
+                self.to_screen(rect, [m[0] as f32, m[1] as f32]),
+                self.to_screen(rect, [g[0] as f32, g[1] as f32]),
+            ];
             painter.add(Shape::line(pts, Stroke::new(sw, p.sel)));
         }
-        if let (Tool::Wire | Tool::Place(_) | Tool::Text, Some(g)) = (self.tool, hg) {
+        if let (Tool::Wire { .. } | Tool::Place { .. } | Tool::Text, Some(g)) = (self.tool, hg) {
             let s = self.to_screen(rect, [g[0] as f32, g[1] as f32]);
             painter.circle_stroke(s, 4.0, Stroke::new(1.0, p.sel));
         }
@@ -800,9 +976,17 @@ impl Editor {
         self.text_rects.clear();
         let mono = FontId::monospace((z * 0.75).clamp(8.0, 22.0));
         for (i, t) in self.sch.texts.iter().enumerate() {
-            let col = if self.sel.texts.contains(&i) { p.sel } else { p.dir };
+            let col = if self.sel.texts.contains(&i) {
+                p.sel
+            } else {
+                p.dir
+            };
             let s = self.to_screen(rect, [t.pos[0] as f32, t.pos[1] as f32]);
-            let g = painter.layout_no_wrap(super::bidi::display(&t.text, super::bidi::Base::Ltr), mono.clone(), col);
+            let g = painter.layout_no_wrap(
+                super::bidi::display(&t.text, super::bidi::Base::Ltr),
+                mono.clone(),
+                col,
+            );
             let r = Rect::from_min_size(s, g.size());
             painter.galley(s, g, col);
             self.text_rects.push(r);
@@ -818,7 +1002,10 @@ impl Editor {
                     continue;
                 }
                 if let Some(v) = self.op_values.get(&key) {
-                    let mid = [(w.a[0] + w.b[0]) as f32 / 2.0, (w.a[1] + w.b[1]) as f32 / 2.0 - 0.6];
+                    let mid = [
+                        (w.a[0] + w.b[0]) as f32 / 2.0,
+                        (w.a[1] + w.b[1]) as f32 / 2.0 - 0.6,
+                    ];
                     let s = self.to_screen(rect, mid);
                     let txt = format!("{}V", swiftsim::expr::fmt_si(*v));
                     let g = painter.layout_no_wrap(txt, small.clone(), Color32::BLACK);
@@ -832,18 +1019,38 @@ impl Editor {
             if let Some(h) = ui.ctx().pointer_hover_pos() {
                 let r = Rect::from_two_pos(start, h);
                 painter.rect_filled(r, CornerRadius::ZERO, p.sel.gamma_multiply(0.08));
-                painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(1.0, p.sel), StrokeKind::Middle);
+                painter.rect_stroke(
+                    r,
+                    CornerRadius::ZERO,
+                    Stroke::new(1.0, p.sel),
+                    StrokeKind::Middle,
+                );
             }
         }
         if let Some(n) = probe_net.filter(|n| n != "0") {
             if let Some(h) = ui.ctx().pointer_hover_pos() {
-                painter.text(h + Vec2::new(14.0, -14.0), Align2::LEFT_BOTTOM, format!("V({n})"), FontId::proportional(13.0), p.probe);
+                painter.text(
+                    h + Vec2::new(14.0, -14.0),
+                    Align2::LEFT_BOTTOM,
+                    format!("V({n})"),
+                    FontId::proportional(13.0),
+                    p.probe,
+                );
             }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn draw_comp(&self, painter: &egui::Painter, rect: Rect, c: &Component, col: Color32, sw: f32, font: &FontId, p: &Pal) {
+    fn draw_comp(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        c: &Component,
+        col: Color32,
+        sw: f32,
+        font: &FontId,
+        p: &Pal,
+    ) {
         let st = Stroke::new(sw, col);
         let tf = |q: [f32; 2]| self.to_screen(rect, c.tf(q));
         for prim in c.prims() {
@@ -852,7 +1059,11 @@ impl Editor {
                     painter.add(Shape::line(v.into_iter().map(tf).collect(), st));
                 }
                 Prim::Poly(v) => {
-                    painter.add(Shape::convex_polygon(v.into_iter().map(tf).collect(), col, Stroke::NONE));
+                    painter.add(Shape::convex_polygon(
+                        v.into_iter().map(tf).collect(),
+                        col,
+                        Stroke::NONE,
+                    ));
                 }
                 Prim::Circle(ctr, r) => {
                     painter.circle_stroke(tf(ctr), r * self.zoom, st);
@@ -864,9 +1075,21 @@ impl Editor {
         }
         if c.kind == Kind::Label {
             let s = tf([0.0, 0.0]);
-            let g = painter.layout_no_wrap(super::bidi::display(&c.value, super::bidi::Base::Auto), font.clone(), col);
-            let r = Rect::from_min_size(s + Vec2::new(4.0, -g.size().y - 2.0), g.size() + Vec2::new(6.0, 2.0));
-            painter.rect_stroke(r, CornerRadius::same(3), Stroke::new(1.0, col), StrokeKind::Middle);
+            let g = painter.layout_no_wrap(
+                super::bidi::display(&c.value, super::bidi::Base::Auto),
+                font.clone(),
+                col,
+            );
+            let r = Rect::from_min_size(
+                s + Vec2::new(4.0, -g.size().y - 2.0),
+                g.size() + Vec2::new(6.0, 2.0),
+            );
+            painter.rect_stroke(
+                r,
+                CornerRadius::same(3),
+                Stroke::new(1.0, col),
+                StrokeKind::Middle,
+            );
             painter.galley(r.min + Vec2::new(3.0, 1.0), g, col);
             painter.circle_filled(s, (self.zoom * 0.15).clamp(1.5, 4.0), col);
             return;
@@ -880,12 +1103,36 @@ impl Editor {
         if vertical {
             let x = b[0] + 0.3;
             let cy = (a[1] + b[1]) / 2.0;
-            painter.text(self.to_screen(rect, [x, cy - 0.45]), Align2::LEFT_CENTER, &c.name, font.clone(), col);
-            painter.text(self.to_screen(rect, [x, cy + 0.45]), Align2::LEFT_CENTER, &c.value, font.clone(), tc);
+            painter.text(
+                self.to_screen(rect, [x, cy - 0.45]),
+                Align2::LEFT_CENTER,
+                &c.name,
+                font.clone(),
+                col,
+            );
+            painter.text(
+                self.to_screen(rect, [x, cy + 0.45]),
+                Align2::LEFT_CENTER,
+                &c.value,
+                font.clone(),
+                tc,
+            );
         } else {
             let cx = (a[0] + b[0]) / 2.0;
-            painter.text(self.to_screen(rect, [cx, a[1] - 0.15]), Align2::CENTER_BOTTOM, &c.name, font.clone(), col);
-            painter.text(self.to_screen(rect, [cx, b[1] + 0.15]), Align2::CENTER_TOP, &c.value, font.clone(), tc);
+            painter.text(
+                self.to_screen(rect, [cx, a[1] - 0.15]),
+                Align2::CENTER_BOTTOM,
+                &c.name,
+                font.clone(),
+                col,
+            );
+            painter.text(
+                self.to_screen(rect, [cx, b[1] + 0.15]),
+                Align2::CENTER_TOP,
+                &c.value,
+                font.clone(),
+                tc,
+            );
         }
     }
 }

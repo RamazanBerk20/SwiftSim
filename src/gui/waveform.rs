@@ -2,7 +2,7 @@
 //! noise spectra (log-log), FFT, two cursors with readout, CSV export.
 
 use super::bidi::{self, Base};
-use super::i18n::{self, tr};
+use super::i18n::{self, tr, trf};
 use eframe::egui;
 use egui::{Color32, RichText};
 use egui_plot::{GridInput, GridMark, HoverPosition, Line, Plot, PlotPoint, PlotPoints, VLine};
@@ -48,6 +48,8 @@ pub struct WaveView {
     fft: bool,
     /// Bumped by the app on new results.
     pub generation: u64,
+    /// Result of the last CSV export, for the app's status line.
+    pub status: Option<String>,
     next_color: usize,
 }
 
@@ -62,7 +64,12 @@ enum Pane {
 /// `I(R1)`, `Ic(Q1)`, … plot on the current pane.
 fn is_current(e: &str) -> bool {
     let l = e.trim().to_ascii_lowercase();
-    l.split_once('(').is_some_and(|(h, _)| matches!(h.trim(), "i" | "ic" | "ib" | "ie" | "id" | "ig" | "is" | "ix"))
+    l.split_once('(').is_some_and(|(h, _)| {
+        matches!(
+            h.trim(),
+            "i" | "ic" | "ib" | "ie" | "id" | "ig" | "is" | "ix"
+        )
+    })
 }
 
 pub fn pretty(sig: &str) -> String {
@@ -70,7 +77,12 @@ pub fn pretty(sig: &str) -> String {
         Some(i) => {
             let (f, r) = sig.split_at(i);
             let mut c = f.chars();
-            let head: String = c.next().map(|x| x.to_ascii_uppercase()).into_iter().chain(c).collect();
+            let head: String = c
+                .next()
+                .map(|x| x.to_ascii_uppercase())
+                .into_iter()
+                .chain(c)
+                .collect();
             format!("{head}{r}")
         }
         None => sig.to_string(),
@@ -123,7 +135,11 @@ fn fft_db(pts: &[PlotPoint]) -> Vec<PlotPoint> {
             j += 1;
         }
         let (a, b) = (pts[j], pts[j + 1]);
-        let y = if b.x > a.x { a.y + (b.y - a.y) * (t - a.x) / (b.x - a.x) } else { a.y };
+        let y = if b.x > a.x {
+            a.y + (b.y - a.y) * (t - a.x) / (b.x - a.x)
+        } else {
+            a.y
+        };
         let w = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * k as f64 / n as f64).cos();
         re[k] = y * w;
     }
@@ -173,10 +189,16 @@ fn log_spacer(input: GridInput) -> Vec<GridMark> {
         return v;
     }
     for d in lo.floor() as i32..=hi.ceil() as i32 {
-        v.push(GridMark { value: d as f64, step_size: 1.0 });
+        v.push(GridMark {
+            value: d as f64,
+            step_size: 1.0,
+        });
         if hi - lo < 8.0 {
             for m in 2..10 {
-                v.push(GridMark { value: d as f64 + (m as f64).log10(), step_size: 0.1 });
+                v.push(GridMark {
+                    value: d as f64 + (m as f64).log10(),
+                    step_size: 0.1,
+                });
             }
         }
     }
@@ -189,7 +211,11 @@ fn interp(p: &[PlotPoint], x: f64) -> Option<f64> {
     }
     let i = p.partition_point(|q| q.x < x).max(1).min(p.len() - 1);
     let (a, b) = (p[i - 1], p[i]);
-    Some(if b.x > a.x { a.y + (b.y - a.y) * (x - a.x) / (b.x - a.x) } else { a.y })
+    Some(if b.x > a.x {
+        a.y + (b.y - a.y) * (x - a.x) / (b.x - a.x)
+    } else {
+        a.y
+    })
 }
 
 impl WaveView {
@@ -198,7 +224,11 @@ impl WaveView {
         if e.is_empty() || self.traces.iter().any(|t| t.expr.eq_ignore_ascii_case(e)) {
             return;
         }
-        self.traces.push(Trace { expr: e.to_string(), color: COLORS[self.next_color % COLORS.len()], visible: true });
+        self.traces.push(Trace {
+            expr: e.to_string(),
+            color: COLORS[self.next_color % COLORS.len()],
+            visible: true,
+        });
         self.next_color += 1;
     }
 
@@ -213,21 +243,51 @@ impl WaveView {
                 let r = if p.kind == PlotKind::Ac {
                     swiftsim::measure::eval_trace_c(p, &t.expr).map(|v| {
                         let lx: Vec<f64> = p.x.iter().map(|f| f.log10()).collect();
-                        let a = lx.iter().zip(&v).map(|(x, z)| PlotPoint::new(*x, 20.0 * z.norm().max(1e-300).log10())).collect();
-                        let b = lx.iter().zip(&v).map(|(x, z)| PlotPoint::new(*x, z.arg_deg())).collect();
+                        let a = lx
+                            .iter()
+                            .zip(&v)
+                            .map(|(x, z)| PlotPoint::new(*x, 20.0 * z.norm().max(1e-300).log10()))
+                            .collect();
+                        let b = lx
+                            .iter()
+                            .zip(&v)
+                            .map(|(x, z)| PlotPoint::new(*x, z.arg_deg()))
+                            .collect();
                         (a, b)
                     })
                 } else if p.kind == PlotKind::Noise {
-                    swiftsim::measure::eval_trace(p, &t.expr)
-                        .map(|v| (p.x.iter().zip(&v).map(|(x, y)| PlotPoint::new(x.log10(), y.abs().max(1e-300).log10())).collect(), vec![]))
+                    swiftsim::measure::eval_trace(p, &t.expr).map(|v| {
+                        (
+                            p.x.iter()
+                                .zip(&v)
+                                .map(|(x, y)| {
+                                    PlotPoint::new(x.log10(), y.abs().max(1e-300).log10())
+                                })
+                                .collect(),
+                            vec![],
+                        )
+                    })
                 } else {
                     swiftsim::measure::eval_trace(p, &t.expr).map(|v| {
-                        let pts: Vec<PlotPoint> = p.x.iter().zip(&v).map(|(x, y)| PlotPoint::new(*x, *y)).collect();
-                        if self.fft && p.kind == PlotKind::Tran { (fft_db(&pts), vec![]) } else { (decimate(pts), vec![]) }
+                        let pts: Vec<PlotPoint> =
+                            p.x.iter()
+                                .zip(&v)
+                                .map(|(x, y)| PlotPoint::new(*x, *y))
+                                .collect();
+                        if self.fft && p.kind == PlotKind::Tran {
+                            (fft_db(&pts), vec![])
+                        } else {
+                            (decimate(pts), vec![])
+                        }
                     })
                 };
                 match r {
-                    Ok((a, b)) => self.series.push(Series { trace: ti, step: p.step.clone(), a, b }),
+                    Ok((a, b)) => self.series.push(Series {
+                        trace: ti,
+                        step: p.step.clone(),
+                        a,
+                        b,
+                    }),
                     Err(e) => {
                         self.errors.push(format!("{}: {e}", t.expr));
                         break;
@@ -240,7 +300,8 @@ impl WaveView {
     pub fn ui(&mut self, ui: &mut egui::Ui, res: Option<&SimResult>) {
         let kind = res.and_then(|r| r.plots.first()).map(|p| p.kind);
         // toolbar
-        i18n::mirrored(ui, |ui| ui.horizontal(|ui| {
+        i18n::mirrored(ui, |ui| {
+            ui.horizontal(|ui| {
             let r = bidi::line(ui, &mut self.input, Base::Ltr, |t| t.hint_text(tr("Add trace: V(out), V(a)-V(b), I(R1)*V(out) …")).desired_width(260.0));
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let s = std::mem::take(&mut self.input);
@@ -274,18 +335,30 @@ impl WaveView {
             if let Some(r) = res {
                 if ui.button(tr("Export CSV…")).clicked() {
                     if let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name("waveforms.csv").save_file() {
-                        let _ = std::fs::write(path, swiftsim::to_csv(&r.plots));
+                        self.status = Some(match super::session::atomic_write(&path, swiftsim::to_csv(&r.plots).as_bytes()) {
+                            Ok(()) => trf("Exported {}", &[&path.display()]),
+                            Err(e) => trf("Export failed: {}", &[&e]),
+                        });
                     }
                 }
             }
             ui.weak(tr("Left-click: cursor 1 · Right-click: cursor 2 · Drag: pan · Scroll: zoom · Double-click: reset"));
-        }));
+        })
+        });
         // trace chips
         let mut remove = None;
         ui.horizontal_wrapped(|ui| {
             for (i, t) in self.traces.iter_mut().enumerate() {
-                let txt = RichText::new(format!("■ {}", t.expr)).color(if t.visible { t.color } else { ui.visuals().weak_text_color() });
-                if ui.selectable_label(false, txt).on_hover_text(tr("Click to show/hide")).clicked() {
+                let txt = RichText::new(format!("■ {}", t.expr)).color(if t.visible {
+                    t.color
+                } else {
+                    ui.visuals().weak_text_color()
+                });
+                if ui
+                    .selectable_label(false, txt)
+                    .on_hover_text(tr("Click to show/hide"))
+                    .clicked()
+                {
                     t.visible = !t.visible;
                 }
                 if ui.small_button("×").clicked() {
@@ -304,14 +377,27 @@ impl WaveView {
             return;
         };
         if kind == Some(PlotKind::Op) || kind.is_none() {
-            ui.centered_and_justified(|ui| ui.weak(tr("Operating point results are shown on the schematic and in the Log tab.")));
+            ui.centered_and_justified(|ui| {
+                ui.weak(tr(
+                    "Operating point results are shown on the schematic and in the Log tab.",
+                ))
+            });
             return;
         }
         if self.traces.is_empty() {
             ui.centered_and_justified(|ui| ui.weak(tr("Pick signals from the Signals menu, type an expression above, or probe the schematic (P).")));
             return;
         }
-        let key = format!("{}|{}|{}", self.generation, self.fft, self.traces.iter().map(|t| t.expr.as_str()).collect::<Vec<_>>().join("\u{1}"));
+        let key = format!(
+            "{}|{}|{}",
+            self.generation,
+            self.fft,
+            self.traces
+                .iter()
+                .map(|t| t.expr.as_str())
+                .collect::<Vec<_>>()
+                .join("\u{1}")
+        );
         if key != self.key {
             self.key = key;
             self.rebuild(res);
@@ -327,17 +413,44 @@ impl WaveView {
             _ if logx => "Hz",
             _ => "",
         };
-        let unit_of = move |e: &str| if logy { "V/√Hz" } else if logx { "dB" } else if is_current(e) { "A" } else { "V" };
-        let fmt_x = move |x: f64| if logx { format!("{}{xunit}", fmt_si(10f64.powf(x))) } else { format!("{}{xunit}", fmt_si(x)) };
-        let readout_h = if self.c1.is_some() || self.c2.is_some() { 24.0 + 20.0 * self.traces.len().min(6) as f32 } else { 0.0 };
+        let unit_of = move |e: &str| {
+            if logy {
+                "V/√Hz"
+            } else if logx {
+                "dB"
+            } else if is_current(e) {
+                "A"
+            } else {
+                "V"
+            }
+        };
+        let fmt_x = move |x: f64| {
+            if logx {
+                format!("{}{xunit}", fmt_si(10f64.powf(x)))
+            } else {
+                format!("{}{xunit}", fmt_si(x))
+            }
+        };
+        let readout_h = if self.c1.is_some() || self.c2.is_some() {
+            24.0 + 20.0 * self.traces.len().min(6) as f32
+        } else {
+            0.0
+        };
         // claim exactly the remaining area; plots live in a child so they can never grow the panel
         let area = ui.available_rect_before_wrap();
         ui.allocate_rect(area, egui::Sense::hover());
-        let ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(area).layout(egui::Layout::top_down(egui::Align::Min)));
+        let ui = &mut ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(area)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
         let avail = (area.height() - readout_h).max(80.0);
         // voltages and currents get their own panes (shared time axis), like separate axes in LTSpice
         let vis = || self.traces.iter().filter(|t| t.visible);
-        let (has_v, has_i) = (vis().any(|t| !is_current(&t.expr)), vis().any(|t| is_current(&t.expr)));
+        let (has_v, has_i) = (
+            vis().any(|t| !is_current(&t.expr)),
+            vis().any(|t| is_current(&t.expr)),
+        );
         let panes: Vec<(Pane, &'static str, f32)> = if kind == Some(PlotKind::Ac) {
             vec![(Pane::All, "dB", 0.62), (Pane::Phase, "°", 0.38)]
         } else if logy {
@@ -363,10 +476,20 @@ impl WaveView {
                 .x_axis_formatter(move |m, _| fmt_x(m.value))
                 .label_formatter(move |h: &HoverPosition| {
                     Some(match h {
-                        HoverPosition::NearDataPoint { plot_name, position, .. } => {
-                            format!("{plot_name}\n{}\n{}{unit}", fmt_x(position.x), fmt_si(fy(position.y)))
+                        HoverPosition::NearDataPoint {
+                            plot_name,
+                            position,
+                            ..
+                        } => {
+                            format!(
+                                "{plot_name}\n{}\n{}{unit}",
+                                fmt_x(position.x),
+                                fmt_si(fy(position.y))
+                            )
                         }
-                        HoverPosition::Elsewhere { position } => format!("{}\n{}{unit}", fmt_x(position.x), fmt_si(fy(position.y))),
+                        HoverPosition::Elsewhere { position } => {
+                            format!("{}\n{}{unit}", fmt_x(position.x), fmt_si(fy(position.y)))
+                        }
                     })
                 });
             if logx {
@@ -379,7 +502,11 @@ impl WaveView {
         };
         let traces = &self.traces;
         let series = &self.series;
-        let show = |ui: &mut egui::Ui, plot: Plot, pane: Pane, c1: &mut Option<f64>, c2: &mut Option<f64>| {
+        let show = |ui: &mut egui::Ui,
+                    plot: Plot,
+                    pane: Pane,
+                    c1: &mut Option<f64>,
+                    c2: &mut Option<f64>| {
             plot.show(ui, |pu| {
                 for s in series {
                     let t = &traces[s.trace];
@@ -392,10 +519,21 @@ impl WaveView {
                         continue;
                     }
                     let pts = if pane == Pane::Phase { &s.b } else { &s.a };
-                    let name = if s.step.is_empty() { t.expr.clone() } else { format!("{} [{}]", t.expr, s.step) };
-                    pu.line(Line::new(name, PlotPoints::Borrowed(pts)).color(t.color).width(1.5));
+                    let name = if s.step.is_empty() {
+                        t.expr.clone()
+                    } else {
+                        format!("{} [{}]", t.expr, s.step)
+                    };
+                    pu.line(
+                        Line::new(name, PlotPoints::Borrowed(pts))
+                            .color(t.color)
+                            .width(1.5),
+                    );
                 }
-                for (c, col) in [(*c1, Color32::from_rgb(255, 235, 59)), (*c2, Color32::from_rgb(255, 64, 129))] {
+                for (c, col) in [
+                    (*c1, Color32::from_rgb(255, 235, 59)),
+                    (*c2, Color32::from_rgb(255, 64, 129)),
+                ] {
                     if let Some(x) = c {
                         pu.vline(VLine::new("", x).color(col).width(1.0));
                     }
@@ -410,7 +548,13 @@ impl WaveView {
         };
         let gaps = 2.0 * ui.spacing().item_spacing.y * panes.len() as f32;
         for (i, &(pane, unit, frac)) in panes.iter().enumerate() {
-            show(ui, make(&format!("wave_pane{i}"), (avail - gaps) * frac, unit), pane, &mut c1, &mut c2);
+            show(
+                ui,
+                make(&format!("wave_pane{i}"), (avail - gaps) * frac, unit),
+                pane,
+                &mut c1,
+                &mut c2,
+            );
         }
         self.c1 = c1;
         self.c2 = c2;
@@ -423,21 +567,42 @@ impl WaveView {
                 match (c1, c2) {
                     (Some(a), Some(b)) if !logx => {
                         let d = b - a;
-                        ui.strong(format!("Δ {}{xunit}  (1/Δ = {}Hz)", fmt_si(d), fmt_si(1.0 / d.abs())));
+                        ui.strong(format!(
+                            "Δ {}{xunit}  (1/Δ = {}Hz)",
+                            fmt_si(d),
+                            fmt_si(1.0 / d.abs())
+                        ));
                     }
                     _ => {
                         ui.strong("Δ");
                     }
                 }
-                close = ui.small_button(i18n::with_symbol("×", tr("Close"))).on_hover_text(tr("Remove both cursors (traces stay)")).clicked();
+                close = ui
+                    .small_button(i18n::with_symbol("×", tr("Close")))
+                    .on_hover_text(tr("Remove both cursors (traces stay)"))
+                    .clicked();
                 ui.end_row();
-                for s in self.series.iter().filter(|s| self.traces[s.trace].visible).take(6) {
+                for s in self
+                    .series
+                    .iter()
+                    .filter(|s| self.traces[s.trace].visible)
+                    .take(6)
+                {
                     let t = &self.traces[s.trace];
-                    let name = if s.step.is_empty() { t.expr.clone() } else { format!("{} [{}]", t.expr, s.step) };
+                    let name = if s.step.is_empty() {
+                        t.expr.clone()
+                    } else {
+                        format!("{} [{}]", t.expr, s.step)
+                    };
                     ui.colored_label(t.color, name);
-                    let (y1, y2) = (c1.and_then(|x| interp(&s.a, x)).map(fy), c2.and_then(|x| interp(&s.a, x)).map(fy));
+                    let (y1, y2) = (
+                        c1.and_then(|x| interp(&s.a, x)).map(fy),
+                        c2.and_then(|x| interp(&s.a, x)).map(fy),
+                    );
                     let yunit = unit_of(&t.expr);
-                    let f = |y: Option<f64>| y.map_or("—".into(), |v| format!("{}{yunit}", fmt_si(v)));
+                    let f = |y: Option<f64>| {
+                        y.map_or("—".into(), |v| format!("{}{yunit}", fmt_si(v)))
+                    };
                     ui.label(f(y1));
                     ui.label(f(y2));
                     ui.label(match (y1, y2) {

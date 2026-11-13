@@ -7,7 +7,9 @@ fn sim(net: &str) -> SimResult {
 }
 
 fn sig<'a>(p: &'a Plot, n: &str) -> &'a [f64] {
-    &p.re[p.index(n).unwrap_or_else(|| panic!("no {n} in {:?}", p.names))]
+    &p.re[p
+        .index(n)
+        .unwrap_or_else(|| panic!("no {n} in {:?}", p.names))]
 }
 
 fn at(p: &Plot, n: &str, t: f64) -> f64 {
@@ -18,31 +20,66 @@ fn at(p: &Plot, n: &str, t: f64) -> f64 {
 }
 
 fn close(a: f64, b: f64, rel: f64) {
-    assert!((a - b).abs() <= rel * b.abs().max(1e-12), "{a} != {b} (rel {rel})");
+    assert!(
+        (a - b).abs() <= rel * b.abs().max(1e-12),
+        "{a} != {b} (rel {rel})"
+    );
 }
 
 #[test]
 fn unicode_node_names_ignore_case() {
     // each pair is one node, so these are 2:1 dividers from 3 V: 1 V across the bottom resistor
     let decomposed_c = "c\u{327}ıkış"; // ç written as c + combining cedilla
-    for (a, b) in [("Çıkış", "çıkış"), ("ÇIKIŞ", "çıkış"), ("GİRİŞ", "giriş"), ("ВЫХОД", "выход"), ("STRASSE", "straße"), ("ΑΣ", "ας"), ("出力", "出力"), ("خرج", "خرج"), (decomposed_c, "çıkış")] {
+    for (a, b) in [
+        ("Çıkış", "çıkış"),
+        ("ÇIKIŞ", "çıkış"),
+        ("GİRİŞ", "giriş"),
+        ("ВЫХОД", "выход"),
+        ("STRASSE", "straße"),
+        ("ΑΣ", "ας"),
+        ("出力", "出力"),
+        ("خرج", "خرج"),
+        (decomposed_c, "çıkış"),
+    ] {
         let r = sim(&format!("div\nV1 1 0 3\nR1 1 {a} 2k\nR2 {b} 0 1k\n.op\n"));
         let p = &r.plots[0];
         close(sig(p, &format!("v({a})"))[0], 1.0, 1e-9);
-        close(swiftsim::measure::eval_trace(p, &format!("V({b})")).unwrap()[0], 1.0, 1e-9);
-        assert!(!r.log.iter().any(|l| l.starts_with("warning")), "{a}/{b}: {:?}", r.log);
+        close(
+            swiftsim::measure::eval_trace(p, &format!("V({b})")).unwrap()[0],
+            1.0,
+            1e-9,
+        );
+        assert!(
+            !r.log.iter().any(|l| l.starts_with("warning")),
+            "{a}/{b}: {:?}",
+            r.log
+        );
     }
 }
 
 #[test]
 fn emoji_node_names_work_and_ignore_variation_selectors() {
     let family = "👨\u{200D}👩\u{200D}👧";
-    for (a, b) in [("🙂", "🙂"), ("❤", "❤\u{FE0F}"), (family, family), ("🇹🇷", "🇹🇷"), ("👍🏽", "👍🏽")] {
+    for (a, b) in [
+        ("🙂", "🙂"),
+        ("❤", "❤\u{FE0F}"),
+        (family, family),
+        ("🇹🇷", "🇹🇷"),
+        ("👍🏽", "👍🏽"),
+    ] {
         let r = sim(&format!("div\nV1 1 0 3\nR1 1 {a} 2k\nR2 {b} 0 1k\n.op\n"));
         let p = &r.plots[0];
         close(sig(p, &format!("v({b})"))[0], 1.0, 1e-9);
-        assert!(!r.log.iter().any(|l| l.starts_with("warning")), "{a}/{b}: {:?}", r.log);
-        assert!(p.names.iter().any(|n| n == &format!("v({a})")), "{:?}", p.names);
+        assert!(
+            !r.log.iter().any(|l| l.starts_with("warning")),
+            "{a}/{b}: {:?}",
+            r.log
+        );
+        assert!(
+            p.names.iter().any(|n| n == &format!("v({a})")),
+            "{:?}",
+            p.names
+        );
     }
 }
 
@@ -53,8 +90,20 @@ fn unicode_names_keep_their_spelling_in_the_results() {
     let p = &r.plots[0];
     assert!(p.names.iter().any(|n| n == "v(ÇIKIŞ)"), "{:?}", p.names);
     assert!(r.log.iter().any(|l| l.contains("v(ÇIKIŞ)")), "{:?}", r.log);
-    assert!(!r.log.iter().chain(&p.names).any(|l| l.contains("çikiş")), "{:?}", r.log);
-    assert_eq!(swiftsim::to_csv(&r.plots).lines().next().unwrap().matches("v(ÇIKIŞ)").count(), 1);
+    assert!(
+        !r.log.iter().chain(&p.names).any(|l| l.contains("çikiş")),
+        "{:?}",
+        r.log
+    );
+    assert_eq!(
+        swiftsim::to_csv(&r.plots)
+            .lines()
+            .next()
+            .unwrap()
+            .matches("v(ÇIKIŞ)")
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -62,7 +111,13 @@ fn different_words_folded_together_are_reported() {
     // kır (field) and kir (dirt) share a key: still one node, but the user is told
     let r = sim("d\nV1 kır 0 2\nR1 kir 0 1k\n.op\n");
     close(sig(&r.plots[0], "i(r1)")[0], 2e-3, 1e-6);
-    assert!(r.log.iter().any(|l| l.starts_with("warning") && l.contains("kır") && l.contains("kir")), "{:?}", r.log);
+    assert!(
+        r.log
+            .iter()
+            .any(|l| l.starts_with("warning") && l.contains("kır") && l.contains("kir")),
+        "{:?}",
+        r.log
+    );
 }
 
 #[test]
@@ -95,7 +150,11 @@ fn rc_lowpass_ac() {
     let f = p.x[i];
     let h = 1.0 / (1.0 + (f / fc).powi(2)).sqrt();
     close(re.hypot(im), h, 1e-6);
-    close(im.atan2(re).to_degrees(), -(f / fc).atan().to_degrees(), 1e-6);
+    close(
+        im.atan2(re).to_degrees(),
+        -(f / fc).atan().to_degrees(),
+        1e-6,
+    );
 }
 
 #[test]
@@ -113,7 +172,12 @@ fn lc_tank_keeps_frequency_and_amplitude() {
     let r = sim("lc\nC1 a 0 1u IC=1\nL1 a 0 1u Rser=0\n.tran 20u uic\n");
     let p = &r.plots[0];
     let v = sig(p, "v(a)");
-    let late = p.x.iter().zip(v).filter(|(t, _)| **t > 15e-6).map(|(_, v)| v.abs()).fold(0.0, f64::max);
+    let late =
+        p.x.iter()
+            .zip(v)
+            .filter(|(t, _)| **t > 15e-6)
+            .map(|(_, v)| v.abs())
+            .fold(0.0, f64::max);
     close(late, 1.0, 0.03);
     let w = 1.0 / (1e-6f64 * 1e-6).sqrt();
     close(at(p, "v(a)", 3e-6), (w * 3e-6).cos(), 0.03);
@@ -139,7 +203,11 @@ fn zener_breakdown() {
 fn bjt_common_emitter() {
     let r = sim("ce\nVcc vcc 0 12\nRb vcc b 1meg\nRc vcc c 2k\nQ1 c b 0 2N3904\n.op\n");
     let p = &r.plots[0];
-    let (ic, ib, ie) = (sig(p, "ic(q1)")[0], sig(p, "ib(q1)")[0], sig(p, "ie(q1)")[0]);
+    let (ic, ib, ie) = (
+        sig(p, "ic(q1)")[0],
+        sig(p, "ib(q1)")[0],
+        sig(p, "ie(q1)")[0],
+    );
     close(ic + ib, -ie, 1e-9);
     let beta = ic / ib;
     assert!((150.0..500.0).contains(&beta), "beta {beta}");
@@ -156,7 +224,8 @@ fn pnp_mirrors_npn() {
 
 #[test]
 fn mosfet_square_law() {
-    let r = sim("m\n.model n1 nmos(vto=1 kp=1m)\nVd d 0 5\nVg g 0 2\nM1 d g 0 0 n1 W=10u L=10u\n.op\n");
+    let r =
+        sim("m\n.model n1 nmos(vto=1 kp=1m)\nVd d 0 5\nVg g 0 2\nM1 d g 0 0 n1 W=10u L=10u\n.op\n");
     close(sig(&r.plots[0], "id(m1)")[0], 0.5e-3, 1e-6);
     let r = sim("m\n.model p1 pmos(vto=-1 kp=1m)\nVd d 0 -5\nVg g 0 -2\nM1 d g 0 0 p1\n.op\n");
     close(sig(&r.plots[0], "id(m1)")[0], -0.5e-3, 1e-6);
@@ -194,7 +263,9 @@ fn controlled_sources() {
 
 #[test]
 fn behavioral_source_and_params() {
-    let r = sim(".param vin=3 k={vin*2}\nV1 in 0 {vin}\nB1 out 0 V=V(in)**2 + k\nR1 out 0 1k\nB2 0 o2 I=if(V(in)>1, 1m, 0)\nR2 o2 0 1k\n.op\n");
+    let r = sim(
+        ".param vin=3 k={vin*2}\nV1 in 0 {vin}\nB1 out 0 V=V(in)**2 + k\nR1 out 0 1k\nB2 0 o2 I=if(V(in)>1, 1m, 0)\nR2 o2 0 1k\n.op\n",
+    );
     let p = &r.plots[0];
     close(sig(p, "v(out)")[0], 15.0, 1e-6);
     close(sig(p, "v(o2)")[0], 1.0, 1e-6);
@@ -238,7 +309,13 @@ C1 out 0 1n
 .meas tran dbl PARAM vavg*2
 ";
     let r = sim(net);
-    let m = |n: &str| r.meas.iter().find(|t| t.1 == n).unwrap_or_else(|| panic!("{n}: {:?}", r.log)).2;
+    let m = |n: &str| {
+        r.meas
+            .iter()
+            .find(|t| t.1 == n)
+            .unwrap_or_else(|| panic!("{n}: {:?}", r.log))
+            .2
+    };
     close(m("vavg"), 1.0, 2e-3);
     close(m("vpp"), 4.0, 2e-3);
     close(m("vrms"), (1.0f64 + 2.0).sqrt(), 2e-3);
@@ -251,7 +328,9 @@ C1 out 0 1n
 
 #[test]
 fn transformer_coupling() {
-    let r = sim("xfmr\nV1 p 0 AC 1\nL1 p 0 1m\nL2 s 0 4m Rser=0\nK1 L1 L2 1\nR1 s 0 1meg\n.ac lin 1 1k 1k\n");
+    let r = sim(
+        "xfmr\nV1 p 0 AC 1\nL1 p 0 1m\nL2 s 0 4m Rser=0\nK1 L1 L2 1\nR1 s 0 1meg\n.ac lin 1 1k 1k\n",
+    );
     let p = &r.plots[0];
     let k = p.index("v(s)").unwrap();
     close(p.re[k][0].hypot(p.im[k][0]), 2.0, 1e-3);
@@ -259,7 +338,9 @@ fn transformer_coupling() {
 
 #[test]
 fn half_wave_rectifier() {
-    let r = sim("rect\nV1 in 0 SIN(0 10 50)\nD1 in out 1N4007\nC1 out 0 100u\nR1 out 0 1k\n.tran 100m\n");
+    let r = sim(
+        "rect\nV1 in 0 SIN(0 10 50)\nD1 in out 1N4007\nC1 out 0 100u\nR1 out 0 1k\n.tran 100m\n",
+    );
     let p = &r.plots[0];
     let v = at(p, "v(out)", 0.095);
     assert!((8.0..9.6).contains(&v), "dc out {v}");
@@ -342,10 +423,22 @@ B2 o2 0 V=hyp(V(in), 2)
     // arguments shadow the global .param x; subckt function sees global k
     close(sig(p, "v(o)")[0], 2.0 * 1.5 + 1.0, 1e-6);
     close(sig(p, "v(o2)")[0], 2.5, 1e-6);
-    let e = run_netlist("t\n.func f(x) {g(x)}\n.func g(x) {f(x)}\nV1 a 0 {f(1)}\n.op\n", None, &Control::default()).err().unwrap();
+    let e = run_netlist(
+        "t\n.func f(x) {g(x)}\n.func g(x) {f(x)}\nV1 a 0 {f(1)}\n.op\n",
+        None,
+        &Control::default(),
+    )
+    .err()
+    .unwrap();
     assert!(e.contains("recursive"), "{e}");
     // a subcircuit's function is not visible outside it
-    let e = run_netlist("t\n.subckt s a\n.func h(x) {x}\nR1 a 0 1\n.ends\nV1 a 0 {h(1)}\n.op\n", None, &Control::default()).err().unwrap();
+    let e = run_netlist(
+        "t\n.subckt s a\n.func h(x) {x}\nR1 a 0 1\n.ends\nV1 a 0 {h(1)}\n.op\n",
+        None,
+        &Control::default(),
+    )
+    .err()
+    .unwrap();
     assert!(e.contains("unknown function 'h'"), "{e}");
 }
 
@@ -357,7 +450,12 @@ fn table_sources() {
             "tbl\nVc c 0 {vc}\nE1 e 0 c 0 table=(0,0 1,10 2,15)\nRe e 0 1k\nG1 0 g TABLE {{V(c)*2}} = (0,0) (4,4m)\nRg g 0 1k\n.op\n"
         ))
     };
-    for (vc, ve, vg) in [(0.5, 5.0, 1.0), (1.5, 12.5, 3.0), (3.0, 15.0, 4.0), (-1.0, 0.0, 0.0)] {
+    for (vc, ve, vg) in [
+        (0.5, 5.0, 1.0),
+        (1.5, 12.5, 3.0),
+        (3.0, 15.0, 4.0),
+        (-1.0, 0.0, 0.0),
+    ] {
         let r = net(vc);
         close(sig(&r.plots[0], "v(e)")[0], ve, 1e-9);
         close(sig(&r.plots[0], "v(g)")[0], vg, 1e-9);
@@ -369,7 +467,9 @@ fn jfet_square_law_and_gate() {
     // extra vendor parameters (betatce, vtotc, mfg) are accepted and ignored
     let m = ".model jn NJF(vto=-2 beta=1m lambda=10m is=1f cgs=2p cgd=1p pb=1 betatce=-.5 vtotc=-2.5m mfg=Fairchild)\n.model jp PJF(vto=-2 beta=1m lambda=10m)\n";
     // saturation: β(Vgs-Vto)²(1+λVds); linear: βVds(2(Vgs-Vto)-Vds)(1+λVds)
-    let r = sim(&format!("j\n{m}Vd d 0 5\nVg g 0 -1\nJ1 d g 0 jn\nVd2 d2 0 0.5\nJ2 d2 g 0 jn\nVd3 d3 0 -5\nVg3 g3 0 1\nJ3 d3 g3 0 jp\n.op\n"));
+    let r = sim(&format!(
+        "j\n{m}Vd d 0 5\nVg g 0 -1\nJ1 d g 0 jn\nVd2 d2 0 0.5\nJ2 d2 g 0 jn\nVd3 d3 0 -5\nVg3 g3 0 1\nJ3 d3 g3 0 jp\n.op\n"
+    ));
     let p = &r.plots[0];
     close(sig(p, "id(j1)")[0], 1e-3 * 1.05, 1e-6);
     close(sig(p, "id(j2)")[0], 1e-3 * 0.5 * 1.5 * 1.005, 1e-6);
@@ -378,23 +478,41 @@ fn jfet_square_law_and_gate() {
     let r = sim(&format!("jg\n{m}Ig 0 g 1m\nJ1 0 g 0 jn\n.op\n"));
     let p = &r.plots[0];
     close(sig(p, "ig(j1)")[0], 1e-3, 1e-6);
-    close(sig(p, "v(g)")[0], swiftsim::devices::VT * (1e-3f64 / 2e-15).ln(), 2e-3);
+    close(
+        sig(p, "v(g)")[0],
+        swiftsim::devices::VT * (1e-3f64 / 2e-15).ln(),
+        2e-3,
+    );
     // AC gate current through Cgs(Vgs=-1) + Cgd(Vgd=-6) depletion caps
-    let r = sim(&format!("jac\n{m}Vd d 0 5\nVg g 0 -1 AC 1\nJ1 d g 0 jn\n.ac lin 1 1meg 1meg\n"));
+    let r = sim(&format!(
+        "jac\n{m}Vd d 0 5\nVg g 0 -1 AC 1\nJ1 d g 0 jn\n.ac lin 1 1meg 1meg\n"
+    ));
     let p = &r.plots[0];
     let k = p.index("ig(j1)").unwrap();
     let c = 2e-12 / 2f64.sqrt() + 1e-12 / 7f64.sqrt();
-    close(p.re[k][0].hypot(p.im[k][0]), 2.0 * std::f64::consts::PI * 1e6 * c, 1e-3);
+    close(
+        p.re[k][0].hypot(p.im[k][0]),
+        2.0 * std::f64::consts::PI * 1e6 * c,
+        1e-3,
+    );
 }
 
 fn model(file: &str) -> String {
-    format!(".include \"{}/tests/models/{file}\"\n", env!("CARGO_MANIFEST_DIR"))
+    format!(
+        ".include \"{}/tests/models/{file}\"\n",
+        env!("CARGO_MANIFEST_DIR")
+    )
 }
 
 #[test]
 fn vendor_tl072_inverting_amplifier() {
     // TI TL072 (PJF input pair, POLY(2)/POLY(5) sources) at ±15 V, gain -10
-    let amp = |src: &str, an: &str| sim(&format!("tl072\n{}Vp vp 0 15\nVn vn 0 -15\nVin in 0 {src}\nRin in m 10k\nRf m out 100k\nX1 0 m vp vn out TL072\n{an}\n", model("TL072.301")));
+    let amp = |src: &str, an: &str| {
+        sim(&format!(
+            "tl072\n{}Vp vp 0 15\nVn vn 0 -15\nVin in 0 {src}\nRin in m 10k\nRf m out 100k\nX1 0 m vp vn out TL072\n{an}\n",
+            model("TL072.301")
+        ))
+    };
     let r = amp("0.5", ".op");
     let p = &r.plots[0];
     close(sig(p, "v(out)")[0], -5.0, 1e-3);
@@ -413,22 +531,38 @@ fn vendor_tl072_inverting_amplifier() {
 #[test]
 fn vendor_tl072_follower_bandwidth() {
     // unity-gain bandwidth of the Boyle model: GA / (2π C2) = 282.8µ / (2π·15p) ≈ 3 MHz
-    let r = sim(&format!("tl072 ac\n{}Vp vp 0 15\nVn vn 0 -15\nVin in 0 0 AC 1\nX1 in out vp vn out TL072\n.ac dec 20 10 100meg\n", model("TL072.301")));
+    let r = sim(&format!(
+        "tl072 ac\n{}Vp vp 0 15\nVn vn 0 -15\nVin in 0 0 AC 1\nX1 in out vp vn out TL072\n.ac dec 20 10 100meg\n",
+        model("TL072.301")
+    ));
     let p = &r.plots[0];
     let k = p.index("v(out)").unwrap();
-    let mag: Vec<f64> = (0..p.x.len()).map(|i| p.re[k][i].hypot(p.im[k][i])).collect();
+    let mag: Vec<f64> = (0..p.x.len())
+        .map(|i| p.re[k][i].hypot(p.im[k][i]))
+        .collect();
     close(mag[0], 1.0, 1e-4);
-    let f3 = p.x[mag.iter().position(|&m| m < std::f64::consts::FRAC_1_SQRT_2).unwrap()];
+    let f3 = p.x[mag
+        .iter()
+        .position(|&m| m < std::f64::consts::FRAC_1_SQRT_2)
+        .unwrap()];
     assert!((2e6..8e6).contains(&f3), "f-3dB {f3}");
 }
 
 #[test]
 fn vendor_lm358_single_supply_and_inverting() {
     // TI LM358 (PNP input pair): input range includes ground on a single 5 V supply
-    let r = sim(&format!("lm358\n{}Vp vp 0 5\nVin in 0 0.2\nX1 in out vp 0 out LM358\n.op\n", model("LM358.101")));
+    let r = sim(&format!(
+        "lm358\n{}Vp vp 0 5\nVin in 0 0.2\nX1 in out vp 0 out LM358\n.op\n",
+        model("LM358.101")
+    ));
     close(sig(&r.plots[0], "v(out)")[0], 0.2, 2e-3);
     // ±5 V, gain -10, and output swing stops short of V+
-    let amp = |vin: f64| sim(&format!("lm358\n{}Vp vp 0 5\nVn vn 0 -5\nVin in 0 {vin}\nRin in m 10k\nRf m out 100k\nX1 0 m vp vn out LM358\n.op\n", model("LM358.101")));
+    let amp = |vin: f64| {
+        sim(&format!(
+            "lm358\n{}Vp vp 0 5\nVn vn 0 -5\nVin in 0 {vin}\nRin in m 10k\nRf m out 100k\nX1 0 m vp vn out LM358\n.op\n",
+            model("LM358.101")
+        ))
+    };
     close(sig(&amp(0.2).plots[0], "v(out)")[0], -2.0, 2e-3);
     let v = sig(&amp(-1.0).plots[0], "v(out)")[0];
     assert!(v > 3.0 && v < 4.5, "clip {v}");
@@ -460,7 +594,8 @@ fn diode_forward_voltage_vs_temperature() {
     let r = sim("d\nI1 0 a 1m\nD1 a 0 DX\n.model DX D(Is=1e-14)\n.step temp list 127\n.op\n");
     close(sig(&r.plots[0], "v(a)")[0], v127, 1e-9);
     assert!(!r.log.iter().any(|l| l.contains("warning")), "{:?}", r.log);
-    let r = sim("d\nI1 0 a 1m\nD1 a 0 DX\n.model DX D(Is=1e-14)\n.options tnom=50\n.temp 50\n.op\n");
+    let r =
+        sim("d\nI1 0 a 1m\nD1 a 0 DX\n.model DX D(Is=1e-14)\n.options tnom=50\n.temp 50\n.op\n");
     close(sig(&r.plots[0], "v(a)")[0], diode_vd(50.0, 50.0), 1e-5);
     // zero-bias junction cap (Cjo=1p, Vj=1, M=.5) → 1.0688542p at 127 °C (SPICE3 pbfact/gmanew rules)
     let r = sim("c
@@ -471,26 +606,38 @@ D1 a 0 DC1
 .ac lin 1 1meg 1meg
 ");
     let p = &r.plots[0];
-    close(-p.im[p.index("i(v1)").unwrap()][0], 2.0 * std::f64::consts::PI * 1e6 * 1.0688542e-12, 1e-6);
+    close(
+        -p.im[p.index("i(v1)").unwrap()][0],
+        2.0 * std::f64::consts::PI * 1e6 * 1.0688542e-12,
+        1e-6,
+    );
 }
 
 #[test]
 fn bjt_beta_and_mos_vto_kp_vs_temperature() {
     // XTB=1.5: beta(127 °C) = 100·(400.15/300.15)^1.5 = 153.93 (no Early/high-injection effects)
-    let r = sim("q\nI1 0 b 10u\nV1 c 0 5\nQ1 c b 0 QX\n.model QX NPN(Is=1e-15 Bf=100 XTB=1.5)\n.temp 127\n.op\n");
+    let r = sim(
+        "q\nI1 0 b 10u\nV1 c 0 5\nQ1 c b 0 QX\n.model QX NPN(Is=1e-15 Bf=100 XTB=1.5)\n.temp 127\n.op\n",
+    );
     let p = &r.plots[0];
     close(sig(p, "ic(q1)")[0] / sig(p, "ib(q1)")[0], 153.9312, 1e-4);
     // level 1, gamma=0, phi=0.6: VTO 1 → 0.89932 V and beta 1m → 1m·(400.15/300.15)^-1.5 at 127 °C
     let net = "m\nVg g 0 3\nVd d 0 5\nM1 d g 0 0 NX L=100u W=100u\n.model NX NMOS(Vto=1 Kp=1m Phi=0.6)\n.step temp list 27 127\n.op\n";
     let r = sim(net);
     close(sig(&r.plots[0], "id(m1)")[0], 0.5e-3 * 2.0 * 2.0, 1e-6);
-    close(sig(&r.plots[1], "id(m1)")[0], 0.5e-3 * (400.15f64 / 300.15).powf(-1.5) * (3.0 - 0.8993219f64).powi(2), 1e-5);
+    close(
+        sig(&r.plots[1], "id(m1)")[0],
+        0.5e-3 * (400.15f64 / 300.15).powf(-1.5) * (3.0 - 0.8993219f64).powi(2),
+        1e-5,
+    );
 }
 
 #[test]
 fn resistor_temperature_coefficients() {
     // 1k·(1 + 4m·100 + 10u·100²) = 1.5k at 127 °C
-    let r = sim("r\nI1 0 a 1m\nR1 a 0 1k tc1=4m tc2=10u\nI2 0 b 1m\nR2 b 0 1k tc=4m,10u\n.temp 127\n.op\n");
+    let r = sim(
+        "r\nI1 0 a 1m\nR1 a 0 1k tc1=4m tc2=10u\nI2 0 b 1m\nR2 b 0 1k tc=4m,10u\n.temp 127\n.op\n",
+    );
     close(sig(&r.plots[0], "v(a)")[0], 1.5, 1e-6);
     close(sig(&r.plots[0], "v(b)")[0], 1.5, 1e-6);
 }
@@ -505,7 +652,11 @@ fn transfer_function_of_divider() {
     close(sig(p, "transfer_function")[0], 0.4, 1e-6);
     close(sig(p, "v1#input_impedance")[0], 1000.0 + 2000.0 / 3.0, 1e-6);
     close(sig(p, "output_impedance_at_v(out)")[0], 400.0, 1e-6);
-    assert!(r.log.iter().any(|l| l.contains("transfer_function = 400m")), "{:?}", r.log);
+    assert!(
+        r.log.iter().any(|l| l.contains("transfer_function = 400m")),
+        "{:?}",
+        r.log
+    );
     // current in, current out: I1 splits equally into R1 and R2→Vm; Rin = R1||R2, Rout = R1+R2
     let r = sim("tf\nI1 0 a 1m\nR1 a 0 1k\nR2 a b 1k\nVm b 0 0\n.tf I(Vm) I1\n");
     let p = &r.plots[0];
@@ -516,7 +667,9 @@ fn transfer_function_of_divider() {
 
 #[test]
 fn fourier_of_clipped_sine() {
-    let r = sim("four\nV1 in 0 SIN(0 1 1k)\nB1 out 0 V=limit(V(in),-0.5,0.5)\nR1 out 0 1k\n.tran 0 5m 0 1u\n.four 1k V(out)\n");
+    let r = sim(
+        "four\nV1 in 0 SIN(0 1 1k)\nB1 out 0 V=limit(V(in),-0.5,0.5)\nR1 out 0 1k\n.tran 0 5m 0 1u\n.four 1k V(out)\n",
+    );
     // sin clipped at ±0.5 (α = 30°): b1 = (2α + sin2α)/π,
     // odd n: bn = 4/π·[½(sin((n−1)α)/(n−1) − sin((n+1)α)/(n+1)) + sinα·cos(nα)/n], even n: 0
     let a = std::f64::consts::FRAC_PI_6;
@@ -527,29 +680,58 @@ fn fourier_of_clipped_sine() {
         } else if n % 2.0 == 0.0 {
             0.0
         } else {
-            4.0 / pi * (0.5 * (((n - 1.0) * a).sin() / (n - 1.0) - ((n + 1.0) * a).sin() / (n + 1.0)) + a.sin() * (n * a).cos() / n)
+            4.0 / pi
+                * (0.5 * (((n - 1.0) * a).sin() / (n - 1.0) - ((n + 1.0) * a).sin() / (n + 1.0))
+                    + a.sin() * (n * a).cos() / n)
         }
     };
     let row = |h: usize| -> f64 {
-        let l = r.log.iter().find(|l| l.split_whitespace().next() == Some(&h.to_string())).unwrap_or_else(|| panic!("{:?}", r.log));
+        let l = r
+            .log
+            .iter()
+            .find(|l| l.split_whitespace().next() == Some(&h.to_string()))
+            .unwrap_or_else(|| panic!("{:?}", r.log));
         l.split_whitespace().nth(2).unwrap().parse().unwrap()
     };
     for h in 1..=9 {
         let want = b(h as f64).abs();
-        assert!((row(h) - want).abs() < 1e-4 * b(1.0), "harmonic {h}: {} vs {want}", row(h));
+        assert!(
+            (row(h) - want).abs() < 1e-4 * b(1.0),
+            "harmonic {h}: {} vs {want}",
+            row(h)
+        );
     }
-    let thd = ((3..=9).step_by(2).map(|n| b(n as f64).powi(2)).sum::<f64>()).sqrt() / b(1.0) * 100.0;
-    let l = r.log.iter().find(|l| l.starts_with("Total Harmonic Distortion")).unwrap();
-    let got: f64 = l.rsplit(' ').next().unwrap().trim_end_matches('%').parse().unwrap();
+    let thd =
+        ((3..=9).step_by(2).map(|n| b(n as f64).powi(2)).sum::<f64>()).sqrt() / b(1.0) * 100.0;
+    let l = r
+        .log
+        .iter()
+        .find(|l| l.starts_with("Total Harmonic Distortion"))
+        .unwrap();
+    let got: f64 = l
+        .rsplit(' ')
+        .next()
+        .unwrap()
+        .trim_end_matches('%')
+        .parse()
+        .unwrap();
     close(got, thd, 1e-3);
-    let dc: f64 = r.log.iter().find_map(|l| l.strip_prefix("DC component: ")).unwrap().parse().unwrap();
+    let dc: f64 = r
+        .log
+        .iter()
+        .find_map(|l| l.strip_prefix("DC component: "))
+        .unwrap()
+        .parse()
+        .unwrap();
     assert!(dc.abs() < 1e-6);
 }
 
 #[test]
 fn jfet_gate_junction_follows_temperature() {
     // forward-biased gate (drain = source) behaves like a diode: Vgs drops ~2 mV/°C
-    let r = sim("jt\n.model jn NJF(vto=-2 beta=1m is=1f)\nIg 0 g 1m\nJ1 0 g 0 jn\n.step temp list 27 127\n.op\n");
+    let r = sim(
+        "jt\n.model jn NJF(vto=-2 beta=1m is=1f)\nIg 0 g 1m\nJ1 0 g 0 jn\n.step temp list 27 127\n.op\n",
+    );
     let (v27, v127) = (sig(&r.plots[0], "v(g)")[0], sig(&r.plots[1], "v(g)")[0]);
     let slope = (v127 - v27) / 100.0;
     assert!((-2.6e-3..-1.4e-3).contains(&slope), "dVgs/dT = {slope}");
@@ -560,7 +742,9 @@ fn jfet_gate_junction_follows_temperature() {
 #[test]
 fn pulse_keeps_sub_ns_edges() {
     // 0.2 ns edges stay 0.2 ns; only a zero edge gets the 1 ns default
-    let r = sim("p\nV1 a 0 PULSE(0 1 1n 0.2n 0.2n 4n 10n)\nV2 b 0 PULSE(0 1 1n 0 0 4n 10n)\nR1 a 0 1k\nR2 b 0 1k\n.tran 0.01n 10n\n");
+    let r = sim(
+        "p\nV1 a 0 PULSE(0 1 1n 0.2n 0.2n 4n 10n)\nV2 b 0 PULSE(0 1 1n 0 0 4n 10n)\nR1 a 0 1k\nR2 b 0 1k\n.tran 0.01n 10n\n",
+    );
     let p = &r.plots[0];
     close(at(p, "v(a)", 1.1e-9), 0.5, 1e-6);
     close(at(p, "v(a)", 5.3e-9), 0.5, 1e-6);
@@ -571,7 +755,11 @@ fn pulse_keeps_sub_ns_edges() {
 fn level1_mosfet_bulk_junctions() {
     // drain pulled below (NMOS) / above (PMOS) the bulk: the IS=1e-14 bulk-drain diode carries 1 mA
     let vt = swiftsim::devices::VT;
-    let net = |temp: &str| sim(&format!("mb\n.model nm NMOS(vto=1 kp=1m)\n.model pm PMOS(vto=-1 kp=1m)\nI1 d 0 1m\nM1 d 0 0 0 nm\nI2 0 d2 1m\nM2 d2 0 0 0 pm\n{temp}\n.op\n"));
+    let net = |temp: &str| {
+        sim(&format!(
+            "mb\n.model nm NMOS(vto=1 kp=1m)\n.model pm PMOS(vto=-1 kp=1m)\nI1 d 0 1m\nM1 d 0 0 0 nm\nI2 0 d2 1m\nM2 d2 0 0 0 pm\n{temp}\n.op\n"
+        ))
+    };
     let p = &net("").plots[0];
     close(sig(p, "v(d)")[0], -vt * (1e11f64 + 1.0).ln(), 1e-6);
     close(sig(p, "id(m1)")[0], -1e-3, 1e-6);
@@ -582,14 +770,24 @@ fn level1_mosfet_bulk_junctions() {
     let eg = |t: f64| 1.16 - 7.02e-4 * t * t / (t + 1108.0);
     let (t0, t1) = (300.15, 400.15);
     let is = 1e-14 * (eg(t0) / (koq * t0) - eg(t1) / (koq * t1)).exp();
-    close(sig(&net(".temp 127").plots[0], "v(d)")[0], -koq * t1 * (1e-3 / is + 1.0).ln(), 1e-6);
+    close(
+        sig(&net(".temp 127").plots[0], "v(d)")[0],
+        -koq * t1 * (1e-3 / is + 1.0).ln(),
+        1e-6,
+    );
 }
 
 #[test]
 fn vdmos_subthreshold_slope() {
     // KSUBTHRES k: Vgst -> k·ln(1 + exp(Vgst/k)), so Id(Vgs = Vto) = Kp/2·(k·ln2)²·(1 + λVds); default k = 0 cuts off
-    let id = |k: &str| sig(&sim(&format!("v\nVd d 0 10\nVg g 0 3\nM1 d g 0 mv\n.model mv VDMOS(vto=3 kp=20 lambda=0.01 {k})\n.op\n")).plots[0], "id(m1)")[0];
-    close(id("ksubthres=0.1"), 10.0 * (0.1 * 2f64.ln()).powi(2) * 1.1, 1e-6);
+    let id = |k: &str| {
+        sig(&sim(&format!("v\nVd d 0 10\nVg g 0 3\nM1 d g 0 mv\n.model mv VDMOS(vto=3 kp=20 lambda=0.01 {k})\n.op\n")).plots[0], "id(m1)")[0]
+    };
+    close(
+        id("ksubthres=0.1"),
+        10.0 * (0.1 * 2f64.ln()).powi(2) * 1.1,
+        1e-6,
+    );
     assert!(id("").abs() < 1e-9);
 }
 
@@ -598,12 +796,19 @@ fn diffusion_charge_history_is_step_independent() {
     // diode reverse recovery (TT = 100 ns): v(a) crosses -2.5 V at 1.0629 µs (ngspice, converged).
     // Charges kept from the pre-final Newton iterate made this drift by 1.5-2.6 ns with the step size.
     for tmax in ["10n", "1n"] {
-        let r = sim(&format!("rr\n.model dt D(is=1e-14 tt=100n cjo=2p)\nV1 in 0 PULSE(5 -5 1u 10n 10n 5u 10u)\nR1 in a 1k\nD1 a 0 dt\n.tran 1n 3u 0 {tmax}\n"));
+        let r = sim(&format!(
+            "rr\n.model dt D(is=1e-14 tt=100n cjo=2p)\nV1 in 0 PULSE(5 -5 1u 10n 10n 5u 10u)\nR1 in a 1k\nD1 a 0 dt\n.tran 1n 3u 0 {tmax}\n"
+        ));
         let p = &r.plots[0];
         let v = sig(p, "v(a)");
-        let k = (1..v.len()).find(|&k| p.x[k] > 1.02e-6 && v[k] <= -2.5).unwrap();
+        let k = (1..v.len())
+            .find(|&k| p.x[k] > 1.02e-6 && v[k] <= -2.5)
+            .unwrap();
         let t = p.x[k - 1] + (-2.5 - v[k - 1]) * (p.x[k] - p.x[k - 1]) / (v[k] - v[k - 1]);
-        assert!((t - 1.0629e-6).abs() < 0.3e-9, "tmax={tmax}: crossing at {t}");
+        assert!(
+            (t - 1.0629e-6).abs() < 0.3e-9,
+            "tmax={tmax}: crossing at {t}"
+        );
     }
 }
 
@@ -613,7 +818,8 @@ const QE: f64 = 1.6021766208e-19;
 
 #[test]
 fn divider_thermal_noise() {
-    let r = sim("n\nV1 in 0 DC 1 AC 1\nR1 in out 3k\nR2 out 0 1k\n.noise V(out) V1 dec 5 10 100k\n");
+    let r =
+        sim("n\nV1 in 0 DC 1 AC 1\nR1 in out 3k\nR2 out 0 1k\n.noise V(out) V1 dec 5 10 100k\n");
     let p = &r.plots[0];
     let rp = 3e3 * 1e3 / 4e3;
     for k in 0..p.x.len() {
@@ -623,7 +829,11 @@ fn divider_thermal_noise() {
         // each resistor's share, R1: 4kT/R1 · (R1||R2)²
         close(sig(p, "v(r1)")[k], (4.0 * KT / 3e3).sqrt() * rp, 1e-6);
     }
-    assert!(r.log.iter().any(|l| l.starts_with("Total output noise:")), "{:?}", r.log);
+    assert!(
+        r.log.iter().any(|l| l.starts_with("Total output noise:")),
+        "{:?}",
+        r.log
+    );
 }
 
 #[test]
@@ -639,13 +849,18 @@ fn bjt_ce_input_noise_matches_textbook() {
     // e_n² = 4kT·Rs + 2q·Ib·Rs² + (2q·Ic + 4kT/RC)·((Rs + rπ)/(gm·rπ))²
     let net = "ce\nVCC vcc 0 10\nVIN in 0 DC 0.7 AC 1\nRS in b 1k\nRC vcc c 5k\nQ1 c b 0 QT\n.model QT NPN(IS=1e-15 BF=100)\n";
     let op = sim(&format!("{net}.op\n"));
-    let (ic, ib) = (sig(&op.plots[0], "ic(q1)")[0], sig(&op.plots[0], "ib(q1)")[0]);
+    let (ic, ib) = (
+        sig(&op.plots[0], "ic(q1)")[0],
+        sig(&op.plots[0], "ib(q1)")[0],
+    );
     let r = sim(&format!("{net}.noise V(c) VIN dec 2 1k 100k\n"));
     let p = &r.plots[0];
     let gm = ic / (KT / QE);
     let rpi = 100.0 / gm;
     let (rs, rc) = (1e3, 5e3);
-    let en2 = 4.0 * KT * rs + 2.0 * QE * ib * rs * rs + (2.0 * QE * ic + 4.0 * KT / rc) * ((rs + rpi) / (gm * rpi)).powi(2);
+    let en2 = 4.0 * KT * rs
+        + 2.0 * QE * ib * rs * rs
+        + (2.0 * QE * ic + 4.0 * KT / rc) * ((rs + rpi) / (gm * rpi)).powi(2);
     for &v in sig(p, "v(inoise)") {
         close(v, en2.sqrt(), 1e-4);
     }
@@ -654,7 +869,9 @@ fn bjt_ce_input_noise_matches_textbook() {
 #[test]
 fn flicker_noise_rises_as_one_over_f() {
     // diode at 1 mA with KF: below the corner the density falls 10 dB per decade
-    let r = sim("d\nI1 0 a DC 1m AC 1\nD1 a 0 DX\n.model DX D(IS=1e-14 KF=1e-12 AF=1)\n.noise V(a) I1 dec 1 1 100\n");
+    let r = sim(
+        "d\nI1 0 a DC 1m AC 1\nD1 a 0 DX\n.model DX D(IS=1e-14 KF=1e-12 AF=1)\n.noise V(a) I1 dec 1 1 100\n",
+    );
     let p = &r.plots[0];
     let v = sig(p, "v(onoise)");
     close(v[0] / v[1], 10f64.sqrt(), 1e-3);
@@ -663,14 +880,258 @@ fn flicker_noise_rises_as_one_over_f() {
 #[test]
 fn params_and_analysis_can_use_step_variables() {
     // LTspice style: .param and the analysis line depend on a stepped variable
-    let r = sim("ps\n.param r={k*1k}\n.param tstop={2/f}\n.step param k list 1 2\n.step param f list 1k 2k\nV1 a 0 1\nR1 a 0 {r}\n.tran 0 {tstop}\n.meas tran rr PARAM r\n");
+    let r = sim(
+        "ps\n.param r={k*1k}\n.param tstop={2/f}\n.step param k list 1 2\n.step param f list 1k 2k\nV1 a 0 1\nR1 a 0 {r}\n.tran 0 {tstop}\n.meas tran rr PARAM r\n",
+    );
     assert_eq!(r.plots.len(), 4);
     for p in &r.plots {
-        let (k, f) = if p.step.contains("k=1 ") { (1.0, 0.0) } else { (2.0, 0.0) };
+        let (k, f) = if p.step.contains("k=1 ") {
+            (1.0, 0.0)
+        } else {
+            (2.0, 0.0)
+        };
         let f = if p.step.ends_with("f=1k") { 1e3 } else { 2e3 } + f;
         close(sig(p, "i(r1)")[0], 1e-3 / k, 1e-9);
         close(*p.x.last().unwrap(), 2.0 / f, 1e-9);
     }
     let rr: Vec<f64> = r.meas.iter().map(|m| m.2).collect();
     assert_eq!(rr, [1e3, 1e3, 2e3, 2e3]);
+}
+
+#[test]
+fn time_dependent_source_currents_are_reported() {
+    // I(I1) of a pulsed current source into 1 kΩ is V(a)/1k; I(B1) = time·1k (A) is V(b)/1Ω
+    // (both flow from 0 into the node, i.e. into the source's first terminal: SPICE's positive direction)
+    let r = sim(
+        "pi\nI1 0 a PULSE(0 1m 1u 1n 1n 1u 2u)\nR1 a 0 1k\nB1 0 b I=time*1k\nR2 b 0 1\nI2 0 c SIN(0 2m 100k)\nR3 c 0 1k\n.tran 5u\n",
+    );
+    let p = &r.plots[0];
+    for (t, pulse) in [
+        (0.5e-6, 0.0),
+        (1.5e-6, 1e-3),
+        (2.5e-6, 0.0),
+        (3.5e-6, 1e-3),
+        (4.5e-6, 0.0),
+    ] {
+        assert!(
+            (at(p, "i(i1)", t) - pulse).abs() < 1e-12
+                && (at(p, "v(a)", t) / 1e3 - pulse).abs() < 1e-12,
+            "t={t}"
+        );
+        close(at(p, "i(b1)", t), t * 1e3, 1e-6);
+        close(
+            at(p, "i(i2)", t),
+            2e-3 * (2.0 * std::f64::consts::PI * 1e5 * t).sin(),
+            2e-3,
+        );
+    }
+    assert!(p.re.iter().flatten().all(|v| v.is_finite()));
+    // .meas sees the same currents: average of t·1k over 0..4 µs is 2 mA
+    let r = sim("pi\nB1 0 b I=time*1k\nR2 b 0 1\n.tran 4u\n.meas tran ib AVG I(B1)\n");
+    close(r.meas[0].2, 2e-3, 1e-6);
+}
+
+/// Inputs the audit crashed the process with: each must be a clean error now.
+#[test]
+fn hostile_netlists_are_errors_not_crashes() {
+    let fixture = |f: &str| {
+        std::fs::read_to_string(format!(
+            "{}/tests/fixtures/audit/{f}",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap()
+    };
+    let err = |n: &str| {
+        run_netlist(n, None, &Control::default())
+            .err()
+            .unwrap_or_else(|| panic!("no error for\n{}", &n[..n.len().min(200)]))
+    };
+    assert!(err(&fixture("aclin.cir")).contains("too many points"));
+    assert!(
+        err("n\nV1 a 0 AC 1\nR1 a 0 1k\n.noise V(a) V1 lin 1e11 1 2\n").contains("too many points")
+    );
+    assert!(err(&fixture("func.cir")).contains("too large"));
+    assert!(err(&fixture("fan.cir")).contains("more than"));
+    assert!(
+        err("s\nV1 a 0 1\nR1 a 0 1\n.step param x 1 1e6 1\n.step param y 1 1e6 1\n.op\n")
+            .contains("too many combinations")
+    );
+    let deep = format!(
+        "d\nV1 a 0 {{{}1{}}}\nR1 a 0 1\n.op\n",
+        "(".repeat(200_000),
+        ")".repeat(200_000)
+    );
+    assert!(err(&deep).contains("nested too deeply"));
+    // .four and .meas problems are reported in the log, the run itself succeeds
+    let log = |n: &str| sim(n).log.join("\n");
+    assert!(log(&fixture("four.cir")).contains("at most 1000 harmonics"));
+    assert!(log(&fixture("avg.cir")).contains("FROM is after TO"));
+    assert!(
+        sim(&fixture("icur.cir")).plots[0]
+            .re
+            .iter()
+            .flatten()
+            .all(|v| v.is_finite())
+    );
+}
+
+/// Runs `net` with `jobs` threads (and Monte Carlo seed `seed`), checking every point was counted.
+fn run_jobs(net: &str, jobs: usize, seed: u64) -> SimResult {
+    let ctl = Control {
+        jobs,
+        seed: Some(seed),
+        ..Default::default()
+    };
+    let r = run_netlist(net, None, &ctl).unwrap_or_else(|e| panic!("{e}\n{net}"));
+    assert_eq!(
+        ctl.points_done.load(std::sync::atomic::Ordering::Relaxed),
+        ctl.points.load(std::sync::atomic::Ordering::Relaxed)
+    );
+    r
+}
+
+/// The same bits, in the same step order, on one thread and on several: plots (real and
+/// imaginary parts), labels, `.meas` and the log (but for its timing line).
+fn same_bits(a: &SimResult, b: &SimResult) {
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert_eq!(a.plots.len(), b.plots.len());
+    for (a, b) in a.plots.iter().zip(&b.plots) {
+        assert_eq!((&a.step, &a.names, a.kind), (&b.step, &b.names, b.kind));
+        assert_eq!(bits(&a.x), bits(&b.x), "{}", a.step);
+        for (ya, yb) in a.re.iter().chain(&a.im).zip(b.re.iter().chain(&b.im)) {
+            assert_eq!(bits(ya), bits(yb), "{}", a.step);
+        }
+    }
+    let meas = |r: &SimResult| {
+        r.meas
+            .iter()
+            .map(|(s, n, v)| (s.clone(), n.clone(), v.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(meas(a), meas(b));
+    assert_eq!(a.log[..a.log.len() - 1], b.log[..b.log.len() - 1]);
+}
+
+/// A `.step` sweep gives the same bits on one thread and on several, for transient (with
+/// nested steps, `.four` and `.meas` across steps), AC, DC sweeps and Monte Carlo.
+#[test]
+fn parallel_step_matches_serial_exactly() {
+    let tran = "ps\n.param tau={r*1u}\n.step param r list 1k 2k 3k 4k 5k 6k 7k\n.step param a list 1 2\nV1 in 0 SINE(0 {a} 1k)\nR1 in out {r}\nC1 out 0 1u\nD1 out 0 DX\n.model DX D(Is=1e-14)\n.tran 3m\n.four 1k V(out)\n.meas tran pk MAX V(out)\n.meas tran t2 PARAM tau*2\n";
+    let ac = "ac\n.step param c list 1n 2n 5n 10n 20n 50n\nV1 in 0 AC 1\nR1 in out 1k\nC1 out 0 {c}\n.ac dec 20 10 10meg\n.meas ac g1 FIND V(out) AT 100k\n";
+    let dc = "dc\n.step param rl list 100 1k 10k 100k\nV1 a 0 1\nD1 a b DX\nR1 b 0 {rl}\n.model DX D(Is=1e-14)\n.dc V1 0 2 0.05\n";
+    let mc = "mc\n.step param n 1 16 1\nV1 a 0 {rand(n)}\nR1 a b {mc(1k, 0.1)}\nR2 b 0 {gauss(1k)}\n.tran 1m\n.meas tran vb AVG V(b)\n";
+    for net in [tran, ac, dc, mc] {
+        let (s, p) = (run_jobs(net, 1, 7), run_jobs(net, 4, 7));
+        assert!(s.plots.len() > 1, "{net}");
+        same_bits(&s, &p);
+    }
+    let r = run_jobs(tran, 1, 7);
+    assert_eq!(
+        (
+            r.plots.len(),
+            r.plots[0].step.as_str(),
+            r.plots[1].step.as_str()
+        ),
+        (14, "r=1k a=1", "r=1k a=2")
+    );
+}
+
+/// Monte Carlo draws are independent from point to point however many threads run them; the
+/// same seed repeats a run, another seed gives other values.
+#[test]
+fn monte_carlo_steps_draw_independent_values() {
+    let net = "mc\n.step param n 1 64 1\nV1 a 0 {rand(n)}\nR1 a 0 1k\n.op\n";
+    let draws = |jobs, seed| {
+        run_jobs(net, jobs, seed)
+            .plots
+            .iter()
+            .map(|p| p.re[p.index("v(a)").unwrap()][0])
+            .collect::<Vec<f64>>()
+    };
+    let v = draws(4, 1);
+    // uniform on [0, 1): all different, mean near 1/2 (64 draws: σ of the mean is 0.036)
+    let mut sorted = v.clone();
+    sorted.sort_by(f64::total_cmp);
+    sorted.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    assert_eq!(sorted.len(), 64, "{v:?}");
+    let mean = v.iter().sum::<f64>() / 64.0;
+    assert!(
+        (mean - 0.5).abs() < 0.15 && v.iter().all(|x| (0.0..1.0).contains(x)),
+        "{mean}"
+    );
+    assert_eq!(v, draws(1, 1));
+    assert_eq!(v, draws(4, 1));
+    assert_ne!(v, draws(4, 2));
+}
+
+/// Stop pressed while workers are in the middle of their points: every worker stops and the run
+/// says so once.
+#[test]
+fn cancel_mid_run_stops_every_worker() {
+    use std::sync::atomic::Ordering;
+    let net = "c\n.step param r 1k 400k 1k\nV1 in 0 SINE(0 1 10k)\nR1 in out {r}\nC1 out 0 1n\nD1 out 0 DX\n.model DX D(Is=1e-14)\n.tran 2m\n";
+    let ctl = Control {
+        jobs: 4,
+        ..Default::default()
+    };
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            while ctl.points_done.load(Ordering::Relaxed) < 4 {
+                std::thread::yield_now();
+            }
+            ctl.cancel.store(true, Ordering::Relaxed);
+        });
+        let t = std::time::Instant::now();
+        let e = run_netlist(net, None, &ctl).err().expect("an error");
+        assert_eq!(e, "simulation cancelled");
+        assert!(t.elapsed().as_secs_f64() < 30.0);
+    });
+    assert!(
+        ctl.points_done.load(Ordering::Relaxed) < 100,
+        "{}",
+        ctl.points_done.load(Ordering::Relaxed)
+    );
+}
+
+/// Every failing point is named, and one failure doesn't hide another.
+#[test]
+fn failing_step_points_are_all_reported() {
+    let net = "f\n.step param x list 0 1 2 3 4\nB1 a 0 V=1/((x-1)*(x-3))\nR1 a 0 1k\n.op\n";
+    for jobs in [1, 3] {
+        let e = run_netlist(
+            net,
+            None,
+            &Control {
+                jobs,
+                ..Default::default()
+            },
+        )
+        .err()
+        .expect("an error");
+        assert!(e.contains("step x=1") && e.contains("step x=3"), "{e}");
+        assert!(
+            !e.contains("x=0") && !e.contains("x=2") && !e.contains("x=4"),
+            "{e}"
+        );
+        assert!(e.find("x=1").unwrap() < e.find("x=3").unwrap(), "{e}");
+    }
+}
+
+/// A cancelled sweep stops every worker and says so once.
+#[test]
+fn cancelled_parallel_step_stops() {
+    let ctl = Control {
+        jobs: 4,
+        ..Default::default()
+    };
+    ctl.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    let e = run_netlist(
+        "c\n.step param r 1 1000 1\nV1 a 0 1\nR1 a 0 {r}\n.op\n",
+        None,
+        &ctl,
+    )
+    .err()
+    .expect("an error");
+    assert_eq!(e, "simulation cancelled");
+    assert!(ctl.points_done.load(std::sync::atomic::Ordering::Relaxed) < 1000);
 }

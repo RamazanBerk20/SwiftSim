@@ -7,7 +7,9 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();
         // FileDescription is the name Windows shows in "Open with" and Task Manager.
-        res.set_icon("assets/swiftsim.ico").set("FileDescription", "SwiftSim").set("ProductName", "SwiftSim");
+        res.set_icon("assets/swiftsim.ico")
+            .set("FileDescription", "SwiftSim")
+            .set("ProductName", "SwiftSim");
         res.compile().expect("embedding Windows resources");
     }
 }

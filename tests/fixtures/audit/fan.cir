@@ -1,0 +1,103 @@
+s
+.subckt s0 a
+R1 a 0 1k
+.ends
+.subckt s1 a
+X0 a s0
+X1 a s0
+X2 a s0
+X3 a s0
+X4 a s0
+X5 a s0
+X6 a s0
+X7 a s0
+X8 a s0
+X9 a s0
+.ends
+.subckt s2 a
+X0 a s1
+X1 a s1
+X2 a s1
+X3 a s1
+X4 a s1
+X5 a s1
+X6 a s1
+X7 a s1
+X8 a s1
+X9 a s1
+.ends
+.subckt s3 a
+X0 a s2
+X1 a s2
+X2 a s2
+X3 a s2
+X4 a s2
+X5 a s2
+X6 a s2
+X7 a s2
+X8 a s2
+X9 a s2
+.ends
+.subckt s4 a
+X0 a s3
+X1 a s3
+X2 a s3
+X3 a s3
+X4 a s3
+X5 a s3
+X6 a s3
+X7 a s3
+X8 a s3
+X9 a s3
+.ends
+.subckt s5 a
+X0 a s4
+X1 a s4
+X2 a s4
+X3 a s4
+X4 a s4
+X5 a s4
+X6 a s4
+X7 a s4
+X8 a s4
+X9 a s4
+.ends
+.subckt s6 a
+X0 a s5
+X1 a s5
+X2 a s5
+X3 a s5
+X4 a s5
+X5 a s5
+X6 a s5
+X7 a s5
+X8 a s5
+X9 a s5
+.ends
+.subckt s7 a
+X0 a s6
+X1 a s6
+X2 a s6
+X3 a s6
+X4 a s6
+X5 a s6
+X6 a s6
+X7 a s6
+X8 a s6
+X9 a s6
+.ends
+.subckt s8 a
+X0 a s7
+X1 a s7
+X2 a s7
+X3 a s7
+X4 a s7
+X5 a s7
+X6 a s7
+X7 a s7
+X8 a s7
+X9 a s7
+.ends
+V1 a 0 1
+X1 a s8
+.op

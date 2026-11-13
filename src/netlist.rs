@@ -56,11 +56,27 @@ pub enum Analysis {
     /// (source name, sweep values); one or two nested sweeps (first is inner).
     Dc(Vec<(String, Vec<f64>)>),
     Ac(Vec<f64>),
-    Tran { tstep: f64, tstop: f64, tstart: f64, tmax: f64, uic: bool },
+    Tran {
+        tstep: f64,
+        tstop: f64,
+        tstart: f64,
+        tmax: f64,
+        uic: bool,
+    },
     /// `.tf V(a[,b]) src` or `.tf I(vx) src`: output (current?, node/source, ref node).
-    Tf { cur: bool, a: String, b: String, src: String },
+    Tf {
+        cur: bool,
+        a: String,
+        b: String,
+        src: String,
+    },
     /// `.noise V(out[,ref]) src dec|oct|lin n fstart fstop`.
-    Noise { out: String, refn: String, src: String, freqs: Vec<f64> },
+    Noise {
+        out: String,
+        refn: String,
+        src: String,
+        freqs: Vec<f64>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -93,7 +109,8 @@ pub struct Deck {
 
 /// Name-like parts of a card, with the separators around them dropped.
 fn name_parts(s: &str) -> impl Iterator<Item = &str> {
-    s.split(|c: char| c.is_whitespace() || "(),={}:.'\"".contains(c)).filter(|w| !w.is_empty())
+    s.split(|c: char| c.is_whitespace() || "(),={}:.'\"".contains(c))
+        .filter(|w| !w.is_empty())
 }
 
 /// SiO2 permittivity, F/m (3.9·ε0, as ngspice's noise models).
@@ -167,8 +184,12 @@ pub fn set_ltspice_lib(p: Option<PathBuf>) {
 
 /// LTspice's `lib` folder (holds `cmp/standard.*` and `sub/`), if any is set or found.
 pub fn ltspice_lib() -> Option<PathBuf> {
-    let set = LTSPICE_LIB.read().unwrap_or_else(|e| e.into_inner()).clone();
-    set.or_else(|| std::env::var_os("SWIFTSIM_LTSPICE_LIB").map(PathBuf::from)).or_else(|| detect_ltspice_lib().clone())
+    let set = LTSPICE_LIB
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    set.or_else(|| std::env::var_os("SWIFTSIM_LTSPICE_LIB").map(PathBuf::from))
+        .or_else(|| detect_ltspice_lib().clone())
 }
 
 /// The first LTspice install found in the usual places (native Windows, Wine, macOS).
@@ -186,8 +207,15 @@ pub fn detect_ltspice_lib() -> &'static Option<PathBuf> {
         if let Some(h) = env("HOME") {
             dirs.push(h.join("Library/Application Support/LTspice/lib"));
             let user = env("USER").unwrap_or_default();
-            let users = env("WINEPREFIX").unwrap_or_else(|| h.join(".wine")).join("drive_c/users").join(user);
-            for d in ["AppData/Local/LTspice/lib", "Documents/LTspiceXVII/lib", "My Documents/LTspiceXVII/lib"] {
+            let users = env("WINEPREFIX")
+                .unwrap_or_else(|| h.join(".wine"))
+                .join("drive_c/users")
+                .join(user);
+            for d in [
+                "AppData/Local/LTspice/lib",
+                "Documents/LTspiceXVII/lib",
+                "My Documents/LTspiceXVII/lib",
+            ] {
                 dirs.push(users.join(d));
             }
         }
@@ -204,7 +232,12 @@ fn ltspice_models(lib: &Path) -> &'static HashMap<String, Model> {
         return m;
     }
     let mut text = String::new();
-    for f in ["standard.dio", "standard.bjt", "standard.mos", "standard.jft"] {
+    for f in [
+        "standard.dio",
+        "standard.bjt",
+        "standard.mos",
+        "standard.jft",
+    ] {
         if let Ok(b) = std::fs::read(lib.join("cmp").join(f)) {
             text += &decode(&b);
             text.push('\n');
@@ -212,7 +245,10 @@ fn ltspice_models(lib: &Path) -> &'static HashMap<String, Model> {
     }
     let (raw, mut lines) = (text.lines().collect::<Vec<_>>(), vec![]);
     let _ = read_lines(&raw, 0, None, &mut lines, &mut Deck::default(), 0);
-    let mut models: HashMap<String, Model> = lines.iter().filter_map(|l| parse_model(&l.text).ok()).collect();
+    let mut models: HashMap<String, Model> = lines
+        .iter()
+        .filter_map(|l| parse_model(&l.text).ok())
+        .collect();
     resolve_ako(&mut models);
     // leaked on purpose: one small map per library folder used in this process
     let m: &'static HashMap<String, Model> = Box::leak(Box::new(models));
@@ -222,7 +258,11 @@ fn ltspice_models(lib: &Path) -> &'static HashMap<String, Model> {
 
 /// `.model x ako:base kind(…)` ("a kind of", LTspice): base's parameters plus x's own.
 fn resolve_ako(models: &mut HashMap<String, Model>) {
-    let akos: Vec<String> = models.iter().filter(|(_, m)| m.params.contains_key("ako")).map(|(k, _)| k.clone()).collect();
+    let akos: Vec<String> = models
+        .iter()
+        .filter(|(_, m)| m.params.contains_key("ako"))
+        .map(|(k, _)| k.clone())
+        .collect();
     for k in akos {
         let mut m = models.remove(&k).unwrap_or_default();
         let base = m.params.remove("ako").unwrap_or_default();
@@ -239,8 +279,13 @@ fn resolve_ako(models: &mut HashMap<String, Model>) {
 /// Text of a model/schematic file: UTF-16LE (newer LTspice), UTF-8, or Latin-1 (µ as 0xB5).
 pub fn decode(b: &[u8]) -> String {
     if b.starts_with(&[0xFF, 0xFE]) || b.get(1) == Some(&0) {
-        let u: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        return String::from_utf16_lossy(&u).trim_start_matches('\u{feff}').to_string();
+        let u: Vec<u16> = b
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        return String::from_utf16_lossy(&u)
+            .trim_start_matches('\u{feff}')
+            .to_string();
     }
     String::from_utf8(b.to_vec()).unwrap_or_else(|_| b.iter().map(|&c| c as char).collect())
 }
@@ -256,7 +301,9 @@ fn param_list(s: &str) -> Vec<(String, String)> {
         return parse_assignments(s);
     }
     let w: Vec<&str> = s.split_whitespace().collect();
-    w.chunks_exact(2).map(|p| (p[0].to_string(), p[1].to_string())).collect()
+    w.chunks_exact(2)
+        .map(|p| (p[0].to_string(), p[1].to_string()))
+        .collect()
 }
 
 /// Split a card into tokens: whitespace/comma separated, with `(`, `)` and
@@ -343,7 +390,11 @@ pub fn parse_assignments(s: &str) -> Vec<(String, String)> {
         let (ks, ke) = key_start(eq);
         let vend = eqs.get(n + 1).map_or(s.len(), |&e| key_start(e).0);
         let key = s[ks..ke].trim().to_string();
-        let val = s[eq + 1..vend].trim().trim_end_matches(')').trim().to_string();
+        let val = s[eq + 1..vend]
+            .trim()
+            .trim_end_matches(')')
+            .trim()
+            .to_string();
         if !key.is_empty() {
             out.push((key, val));
         }
@@ -352,8 +403,14 @@ pub fn parse_assignments(s: &str) -> Vec<(String, String)> {
 }
 
 fn parse_model(t: &str) -> Result<(String, Model), String> {
-    let rest = t.trim_start().strip_prefix(".model").ok_or("not a .model line")?.trim_start();
-    let (name, rest) = rest.split_once(char::is_whitespace).ok_or("incomplete .model")?;
+    let rest = t
+        .trim_start()
+        .strip_prefix(".model")
+        .ok_or("not a .model line")?
+        .trim_start();
+    let (name, rest) = rest
+        .split_once(char::is_whitespace)
+        .ok_or("incomplete .model")?;
     let rest = rest.trim_start();
     let (ako, rest) = match rest.strip_prefix("ako:") {
         Some(r) => {
@@ -362,9 +419,15 @@ fn parse_model(t: &str) -> Result<(String, Model), String> {
         }
         None => (None, rest),
     };
-    let kend = rest.find(|c: char| !c.is_ascii_alphanumeric()).unwrap_or(rest.len());
+    let kend = rest
+        .find(|c: char| !c.is_ascii_alphanumeric())
+        .unwrap_or(rest.len());
     let kind = rest[..kend].to_string();
-    let body = rest[kend..].trim().trim_start_matches('(').trim_end().trim_end_matches(')');
+    let body = rest[kend..]
+        .trim()
+        .trim_start_matches('(')
+        .trim_end()
+        .trim_end_matches(')');
     let mut params: HashMap<String, String> = parse_assignments(body).into_iter().collect();
     // bare flags such as `pchan`
     let toks = tokenize(body);
@@ -386,17 +449,174 @@ fn eval_str(s: &str, sc: &Scope) -> Result<f64, String> {
         return Ok(v);
     }
     let inner = s.trim_matches('\'').trim_matches('"');
-    Expr::parse(inner)?.inline(&sc.funcs)?.eval(&VarEnv(&|n| sc.get(n).copied())).map_err(|e| format!("'{s}': {e}"))
+    Expr::parse(inner)?
+        .inline(&sc.funcs)?
+        .eval(&VarEnv(&|n| sc.get(n).copied()))
+        .map_err(|e| format!("'{s}': {e}"))
 }
 
 /// Skip `n` whitespace-separated words and return the remainder.
 fn after_words(s: &str, n: usize) -> &str {
     let mut r = s.trim_start();
     for _ in 0..n {
-        r = r.find(char::is_whitespace).map_or("", |i| r[i..].trim_start());
+        r = r
+            .find(char::is_whitespace)
+            .map_or("", |i| r[i..].trim_start());
     }
     r
 }
+
+/// A number in SPICE syntax (`4.7k`, `1meg`, `10u`, never `M` or `µ`), to 6 significant digits.
+pub fn fmt_spice(v: f64) -> String {
+    if v == 0.0 || !v.is_finite() {
+        return format!("{v}");
+    }
+    let (m, s) = [
+        (1e12, "t"),
+        (1e9, "g"),
+        (1e6, "meg"),
+        (1e3, "k"),
+        (1.0, ""),
+        (1e-3, "m"),
+        (1e-6, "u"),
+        (1e-9, "n"),
+        (1e-12, "p"),
+        (1e-15, "f"),
+    ]
+    .into_iter()
+    .find(|(m, _)| v.abs() >= *m * 0.9999995)
+    .unwrap_or((1e-15, "f"));
+    let x = v / m;
+    let t = format!(
+        "{:.*}",
+        5 - (x.abs().log10().floor().clamp(0.0, 2.0) as usize),
+        x
+    );
+    let t = if t.contains('.') {
+        t.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        &t
+    };
+    format!("{t}{s}")
+}
+
+type Spans = Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>;
+
+/// Byte ranges of (name, value) of each assignment on top-level `.param` lines, per line of `text`
+/// (lines inside `.subckt` and comments are skipped), plus the names `.step` lines sweep.
+fn param_spans(text: &str) -> (Vec<Spans>, Vec<String>) {
+    let (mut out, mut stepped, mut depth) = (vec![], vec![], 0usize);
+    for line in text.split_inclusive('\n') {
+        let code = &line[..line.find(';').unwrap_or(line.len())];
+        let first = code
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let mut spans = vec![];
+        match first.as_str() {
+            ".subckt" => depth += 1,
+            ".ends" => depth = depth.saturating_sub(1),
+            ".step" if depth == 0 => {
+                let w: Vec<String> = tokenize(&code.to_ascii_lowercase());
+                let mut i = 1 + w
+                    .get(1)
+                    .is_some_and(|x| matches!(x.as_str(), "lin" | "dec" | "oct"))
+                    as usize;
+                i += w.get(i).is_some_and(|x| x == "param") as usize;
+                stepped.extend(w.get(i).map(|n| crate::expr::fold(n)));
+            }
+            ".param" | ".params" if depth == 0 => {
+                // words with their offsets; `=` is a word of its own, `{…}` and `(…)` stay whole
+                let mut words: Vec<std::ops::Range<usize>> = vec![];
+                let (b, mut i) = (
+                    code.as_bytes(),
+                    code.find(|c: char| c.is_whitespace()).unwrap_or(code.len()),
+                );
+                while i < b.len() {
+                    if b[i].is_ascii_whitespace() || b[i] == b',' {
+                        i += 1;
+                        continue;
+                    }
+                    let start = i;
+                    if b[i] == b'=' {
+                        i += 1;
+                    } else {
+                        let mut level = 0i32;
+                        while i < b.len()
+                            && (level > 0
+                                || !(b[i].is_ascii_whitespace() || b[i] == b'=' || b[i] == b','))
+                        {
+                            level += matches!(b[i], b'{' | b'(') as i32
+                                - matches!(b[i], b'}' | b')') as i32;
+                            i += 1;
+                        }
+                    }
+                    words.push(start..i);
+                }
+                if words.iter().any(|w| &code[w.clone()] == "=") {
+                    for k in 1..words.len().saturating_sub(1) {
+                        if &code[words[k].clone()] == "="
+                            && &code[words[k - 1].clone()] != "="
+                            && &code[words[k + 1].clone()] != "="
+                        {
+                            spans.push((words[k - 1].clone(), words[k + 1].clone()));
+                        }
+                    }
+                } else {
+                    spans.extend(words.chunks_exact(2).map(|p| (p[0].clone(), p[1].clone())));
+                }
+            }
+            _ => {}
+        }
+        out.push(spans);
+    }
+    (out, stepped)
+}
+
+/// The top-level `.param`s of a netlist whose value is a plain number, by name as written
+/// (a name defined twice counts once, with its last value). Names a `.step` sweeps are left out.
+pub fn numeric_params(text: &str) -> Vec<(String, f64)> {
+    let (spans, stepped) = param_spans(text);
+    let mut out: Vec<(String, f64)> = vec![];
+    for (line, spans) in text.split_inclusive('\n').zip(&spans) {
+        for (n, v) in spans {
+            let (name, key) = (&line[n.clone()], crate::expr::fold(&line[n.clone()]));
+            out.retain(|(o, _)| crate::expr::fold(o) != key);
+            if let Some(x) = parse_number(&line[v.clone()].to_ascii_lowercase())
+                .filter(|x| x.is_finite() && !stepped.contains(&key))
+            {
+                out.push((name.to_string(), x));
+            }
+        }
+    }
+    out
+}
+
+/// `text` with every numeric `.param` value named in `values` (by `expr::fold`) replaced.
+pub fn set_params(text: &str, values: &[(String, f64)]) -> String {
+    let (spans, _) = param_spans(text);
+    let mut out = String::with_capacity(text.len());
+    for (line, spans) in text.split_inclusive('\n').zip(&spans) {
+        let mut l = line.to_string();
+        for (n, v) in spans.iter().rev() {
+            let key = crate::expr::fold(&line[n.clone()]);
+            if parse_number(&line[v.clone()].to_ascii_lowercase()).is_none() {
+                continue;
+            }
+            if let Some((_, x)) = values.iter().find(|(k, _)| crate::expr::fold(k) == key) {
+                l.replace_range(v.clone(), &fmt_spice(*x));
+            }
+        }
+        out += &l;
+    }
+    out
+}
+
+/// Most points a sweep may have; larger counts are typos or hostile files, not circuits.
+pub const MAX_POINTS: usize = 10_000_000;
+/// Most circuit elements subcircuit expansion may produce.
+const MAX_ELEMENTS: usize = 1_000_000;
 
 /// Values of a linear/log sweep: lin (start, stop, step), dec/oct (start, stop, points).
 pub fn sweep(kind: &str, a: f64, b: f64, c: f64) -> Result<Vec<f64>, String> {
@@ -410,7 +630,7 @@ pub fn sweep(kind: &str, a: f64, b: f64, c: f64) -> Result<Vec<f64>, String> {
             let mut k = 0.0;
             loop {
                 let x = a * base.powf(k / c);
-                if x > b * (1.0 + 1e-9) || v.len() > 10_000_000 {
+                if x > b * (1.0 + 1e-9) || v.len() > MAX_POINTS {
                     break;
                 }
                 v.push(x);
@@ -422,7 +642,7 @@ pub fn sweep(kind: &str, a: f64, b: f64, c: f64) -> Result<Vec<f64>, String> {
                 return Err(format!("bad sweep {a} to {b} step {c}"));
             }
             let n = ((b - a) / c + 1e-9).floor() as usize + 1;
-            if n > 10_000_000 {
+            if n > MAX_POINTS {
                 return Err("sweep has too many points".into());
             }
             v.extend((0..n).map(|i| a + c * i as f64));
@@ -458,8 +678,13 @@ impl Deck {
                 None => {
                     self.spelling.insert(key, w.to_string());
                 }
-                Some(first) if !(first.is_ascii() && w.is_ascii()) && crate::expr::distinct_spellings(first, w) => {
-                    let msg = format!("line {no}: '{first}' and '{w}' are the same name here (names ignore case, and ı and İ count as i)");
+                Some(first)
+                    if !(first.is_ascii() && w.is_ascii())
+                        && crate::expr::distinct_spellings(first, w) =>
+                {
+                    let msg = format!(
+                        "line {no}: '{first}' and '{w}' are the same name here (names ignore case, and ı and İ count as i)"
+                    );
                     if !self.warnings.contains(&msg) {
                         self.warnings.push(msg);
                     }
@@ -476,7 +701,12 @@ impl Deck {
         for w in name_parts(s) {
             let at = rest.find(w).unwrap_or(0);
             out.push_str(&rest[..at]);
-            out.push_str(self.spelling.get(w).filter(|o| !o.is_ascii()).map_or(w, |o| o.as_str()));
+            out.push_str(
+                self.spelling
+                    .get(w)
+                    .filter(|o| !o.is_ascii())
+                    .map_or(w, |o| o.as_str()),
+            );
             rest = &rest[at + w.len()..];
         }
         out + rest
@@ -489,25 +719,41 @@ impl Deck {
             match first.as_str() {
                 ".subckt" => {
                     let toks = tokenize(&l.text);
-                    let name = toks.get(1).ok_or(format!("line {}: .subckt needs a name", l.no))?.clone();
+                    let name = toks
+                        .get(1)
+                        .ok_or(format!("line {}: .subckt needs a name", l.no))?
+                        .clone();
                     let (mut ports, mut params) = (vec![], vec![]);
                     let mut i = 2;
                     while i < toks.len() {
                         if toks[i] == "params:" {
                             i += 1;
                         } else if toks.get(i + 1).is_some_and(|t| t == "=") {
-                            params.push((toks[i].clone(), toks.get(i + 2).cloned().unwrap_or_default()));
+                            params.push((
+                                toks[i].clone(),
+                                toks.get(i + 2).cloned().unwrap_or_default(),
+                            ));
                             i += 3;
                         } else {
                             ports.push(toks[i].clone());
                             i += 1;
                         }
                     }
-                    stack.push((name, Subckt { ports, params, funcs: Funcs::new(), body: vec![] }));
+                    stack.push((
+                        name,
+                        Subckt {
+                            ports,
+                            params,
+                            funcs: Funcs::new(),
+                            body: vec![],
+                        },
+                    ));
                     continue;
                 }
                 ".ends" => {
-                    let (n, s) = stack.pop().ok_or(format!("line {}: .ends without .subckt", l.no))?;
+                    let (n, s) = stack
+                        .pop()
+                        .ok_or(format!("line {}: .ends without .subckt", l.no))?;
                     self.subckts.insert(n, s);
                     continue;
                 }
@@ -517,8 +763,12 @@ impl Deck {
                     continue;
                 }
                 ".func" => {
-                    let (n, f) = parse_func(after_words(&l.text, 1)).map_err(|e| format!("line {}: {e}", l.no))?;
-                    stack.last_mut().map_or(&mut self.funcs, |(_, s)| &mut s.funcs).insert(n, f);
+                    let (n, f) = parse_func(after_words(&l.text, 1))
+                        .map_err(|e| format!("line {}: {e}", l.no))?;
+                    stack
+                        .last_mut()
+                        .map_or(&mut self.funcs, |(_, s)| &mut s.funcs)
+                        .insert(n, f);
                     continue;
                 }
                 _ => {}
@@ -537,7 +787,10 @@ impl Deck {
                     if self.analysis.is_none() {
                         self.analysis = Some(l);
                     } else {
-                        self.warnings.push(format!("line {}: extra analysis '{}' ignored", l.no, l.text));
+                        self.warnings.push(format!(
+                            "line {}: extra analysis '{}' ignored",
+                            l.no, l.text
+                        ));
                     }
                 }
                 ".step" => self.steps.push(l),
@@ -546,8 +799,12 @@ impl Deck {
                 ".temp" => self.temps.push(l),
                 ".four" | ".fourier" => self.four.push(l),
                 ".options" | ".option" | ".opt" | ".opts" => self.options.push(l),
-                ".backanno" | ".save" | ".probe" | ".plot" | ".print" | ".width" | ".title" | ".end" | ".endl" => {}
-                f if f.starts_with('.') => self.warnings.push(format!("line {}: '{f}' is not supported yet and was ignored", l.no)),
+                ".backanno" | ".save" | ".probe" | ".plot" | ".print" | ".width" | ".title"
+                | ".end" | ".endl" => {}
+                f if f.starts_with('.') => self.warnings.push(format!(
+                    "line {}: '{f}' is not supported yet and was ignored",
+                    l.no
+                )),
                 _ => self.cards.push(l),
             }
         }
@@ -563,19 +820,32 @@ impl Deck {
         let mut v = vec![];
         for l in &self.temps {
             for t in l.text.split_whitespace().skip(1) {
-                v.push(eval_str(t, &Scope::default()).map_err(|e| format!("line {}: .temp: {e}", l.no))?);
+                v.push(
+                    eval_str(t, &Scope::default())
+                        .map_err(|e| format!("line {}: .temp: {e}", l.no))?,
+                );
             }
         }
         Ok(v)
     }
 
     pub fn eval_params(&self, over: &HashMap<String, f64>) -> Result<Scope, String> {
-        let mut sc = Scope { vars: over.clone(), funcs: Rc::new(self.funcs.clone()) };
+        let mut sc = Scope {
+            vars: over.clone(),
+            funcs: Rc::new(self.funcs.clone()),
+        };
         // circuit temperature (°C): stepped value, single `.temp`, or 27
         if !sc.contains_key("temp") {
-            sc.insert("temp".into(), self.temps()?.first().copied().unwrap_or(27.0));
+            sc.insert(
+                "temp".into(),
+                self.temps()?.first().copied().unwrap_or(27.0),
+            );
         }
-        let mut pending: Vec<&(String, String)> = self.params.iter().filter(|(k, _)| !over.contains_key(k)).collect();
+        let mut pending: Vec<&(String, String)> = self
+            .params
+            .iter()
+            .filter(|(k, _)| !over.contains_key(k))
+            .collect();
         while !pending.is_empty() {
             let before = pending.len();
             let mut last_err = String::new();
@@ -619,17 +889,35 @@ impl Deck {
     }
 
     pub fn analysis(&self, sc: &Scope) -> Result<Analysis, String> {
-        let l = self.analysis.as_ref().ok_or("no analysis command: add .op, .tran, .ac, .dc, .tf or .noise")?;
+        let l = self
+            .analysis
+            .as_ref()
+            .ok_or("no analysis command: add .op, .tran, .ac, .dc, .tf or .noise")?;
         let toks = tokenize(&l.text);
         let e = |s: &str| eval_str(s, sc).map_err(|er| format!("line {}: {er}", l.no));
-        let tk = |i: usize| toks.get(i).map(|s| s.as_str()).ok_or(format!("line {}: incomplete '{}'", l.no, l.text));
+        let tk = |i: usize| {
+            toks.get(i)
+                .map(|s| s.as_str())
+                .ok_or(format!("line {}: incomplete '{}'", l.no, l.text))
+        };
         // frequency sweep `dec|oct|lin <points> <fstart> <fstop>` starting at token `i`
         let freqs = |i: usize| -> Result<Vec<f64>, String> {
             let kind = tk(i)?;
             let (n, f1, f2) = (e(tk(i + 1)?)?, e(tk(i + 2)?)?, e(tk(i + 3)?)?);
             if kind == "lin" {
+                if n.is_nan() || n > MAX_POINTS as f64 {
+                    return Err(format!("line {}: sweep has too many points", l.no));
+                }
                 let n = n.max(1.0) as usize;
-                Ok((0..n).map(|i| if n == 1 { f1 } else { f1 + (f2 - f1) * i as f64 / (n - 1) as f64 }).collect())
+                Ok((0..n)
+                    .map(|i| {
+                        if n == 1 {
+                            f1
+                        } else {
+                            f1 + (f2 - f1) * i as f64 / (n - 1) as f64
+                        }
+                    })
+                    .collect())
             } else {
                 sweep(kind, f1, f2, n).map_err(|er| format!("line {}: {er}", l.no))
             }
@@ -640,18 +928,34 @@ impl Deck {
                 let uic = toks.iter().any(|t| t == "uic");
                 let nums = toks[1..]
                     .iter()
-                    .filter(|t| !matches!(t.as_str(), "uic" | "startup" | "steady" | "nodiscard" | "step"))
+                    .filter(|t| {
+                        !matches!(
+                            t.as_str(),
+                            "uic" | "startup" | "steady" | "nodiscard" | "step"
+                        )
+                    })
                     .map(|t| e(t))
                     .collect::<Result<Vec<_>, _>>()?;
                 let (tstep, tstop, tstart, tmax) = match nums.len() {
                     0 => return Err(format!("line {}: .tran needs a stop time", l.no)),
                     1 => (0.0, nums[0], 0.0, 0.0),
-                    _ => (nums[0], nums[1], nums.get(2).copied().unwrap_or(0.0), nums.get(3).copied().unwrap_or(0.0)),
+                    _ => (
+                        nums[0],
+                        nums[1],
+                        nums.get(2).copied().unwrap_or(0.0),
+                        nums.get(3).copied().unwrap_or(0.0),
+                    ),
                 };
                 if !(tstop > 0.0) || tstart >= tstop {
                     return Err(format!("line {}: bad .tran times", l.no));
                 }
-                Analysis::Tran { tstep, tstop, tstart, tmax, uic }
+                Analysis::Tran {
+                    tstep,
+                    tstop,
+                    tstart,
+                    tmax,
+                    uic,
+                }
             }
             ".ac" => Analysis::Ac(freqs(1)?),
             ".noise" => {
@@ -659,9 +963,19 @@ impl Deck {
                 let (out, refn, src, at) = match t[..] {
                     ["v", "(", a, ")", src, ..] => (a, "", src, 6),
                     ["v", "(", a, b, ")", src, ..] => (a, b, src, 7),
-                    _ => return Err(format!("line {}: expected .noise V(out[,ref]) <source> dec|oct|lin <points> <fstart> <fstop>", l.no)),
+                    _ => {
+                        return Err(format!(
+                            "line {}: expected .noise V(out[,ref]) <source> dec|oct|lin <points> <fstart> <fstop>",
+                            l.no
+                        ));
+                    }
                 };
-                Analysis::Noise { out: out.into(), refn: refn.into(), src: src.into(), freqs: freqs(at)? }
+                Analysis::Noise {
+                    out: out.into(),
+                    refn: refn.into(),
+                    src: src.into(),
+                    freqs: freqs(at)?,
+                }
             }
             ".dc" => {
                 let args: Vec<&String> = toks[1..].iter().filter(|t| t.as_str() != "lin").collect();
@@ -670,7 +984,8 @@ impl Deck {
                     if g.len() < 4 {
                         return Err(format!("line {}: .dc needs source start stop step", l.no));
                     }
-                    let v = sweep("lin", e(g[1])?, e(g[2])?, e(g[3])?).map_err(|er| format!("line {}: {er}", l.no))?;
+                    let v = sweep("lin", e(g[1])?, e(g[2])?, e(g[3])?)
+                        .map_err(|er| format!("line {}: {er}", l.no))?;
                     sw.push((g[0].clone(), v));
                 }
                 if sw.is_empty() || sw.len() > 2 {
@@ -684,9 +999,19 @@ impl Deck {
                     ["v", "(", a, ")", src] => (false, a, "", src),
                     ["v", "(", a, b, ")", src] => (false, a, b, src),
                     ["i", "(", a, ")", src] => (true, a, "", src),
-                    _ => return Err(format!("line {}: expected .tf V(out[,ref]) <source> or .tf I(<vsource>) <source>", l.no)),
+                    _ => {
+                        return Err(format!(
+                            "line {}: expected .tf V(out[,ref]) <source> or .tf I(<vsource>) <source>",
+                            l.no
+                        ));
+                    }
                 };
-                Analysis::Tf { cur, a: a.into(), b: b.into(), src: src.into() }
+                Analysis::Tf {
+                    cur,
+                    a: a.into(),
+                    b: b.into(),
+                    src: src.into(),
+                }
             }
             _ => unreachable!(),
         })
@@ -699,7 +1024,9 @@ impl Deck {
             .filter_map(|l| {
                 let t = tokenize(&l.text);
                 let mut i = 1;
-                if t.get(i).is_some_and(|x| matches!(x.as_str(), "lin" | "dec" | "oct")) {
+                if t.get(i)
+                    .is_some_and(|x| matches!(x.as_str(), "lin" | "dec" | "oct"))
+                {
                     i += 1;
                 }
                 if t.get(i).is_some_and(|x| x == "param") {
@@ -717,22 +1044,32 @@ impl Deck {
             let e = |s: &str| eval_str(s, sc).map_err(|er| format!("line {}: {er}", l.no));
             let mut i = 1;
             let mut mode = "lin";
-            if let Some(m) = toks.get(i).filter(|t| matches!(t.as_str(), "lin" | "dec" | "oct")) {
+            if let Some(m) = toks
+                .get(i)
+                .filter(|t| matches!(t.as_str(), "lin" | "dec" | "oct"))
+            {
                 mode = m;
                 i += 1;
             }
             if toks.get(i).is_some_and(|t| t == "param") {
                 i += 1;
             }
-            let name = toks.get(i).ok_or(format!("line {}: incomplete .step", l.no))?.clone();
+            let name = toks
+                .get(i)
+                .ok_or(format!("line {}: incomplete .step", l.no))?
+                .clone();
             i += 1;
             let values = if toks.get(i).is_some_and(|t| t == "list") {
-                toks[i + 1..].iter().map(|t| e(t)).collect::<Result<Vec<_>, _>>()?
+                toks[i + 1..]
+                    .iter()
+                    .map(|t| e(t))
+                    .collect::<Result<Vec<_>, _>>()?
             } else {
                 if toks.len() < i + 3 {
                     return Err(format!("line {}: .step needs start stop step", l.no));
                 }
-                sweep(mode, e(&toks[i])?, e(&toks[i + 1])?, e(&toks[i + 2])?).map_err(|er| format!("line {}: {er}", l.no))?
+                sweep(mode, e(&toks[i])?, e(&toks[i + 1])?, e(&toks[i + 2])?)
+                    .map_err(|er| format!("line {}: {er}", l.no))?
             };
             out.push(Step { name, values });
         }
@@ -741,7 +1078,10 @@ impl Deck {
             if out.iter().any(|s| s.name == "temp") {
                 warn.push(".temp ignored: .step temp sets the temperature".into());
             } else {
-                out.push(Step { name: "temp".into(), values: temps });
+                out.push(Step {
+                    name: "temp".into(),
+                    values: temps,
+                });
             }
         }
         Ok((out, warn))
@@ -749,33 +1089,58 @@ impl Deck {
 
     /// Netlist `.model`s, then SwiftSim's built-ins, then LTspice's `cmp/standard.*`.
     fn find_model(&self, name: &str) -> Option<&Model> {
-        self.models.get(name).or_else(|| builtin_models().get(name)).or_else(|| ltspice_models(&ltspice_lib()?).get(name))
+        self.models
+            .get(name)
+            .or_else(|| builtin_models().get(name))
+            .or_else(|| ltspice_models(&ltspice_lib()?).get(name))
     }
 
     /// Names the encrypted libraries a missing model/subcircuit may be in.
     fn enc_hint(&self) -> String {
-        if self.encrypted.is_empty() { String::new() } else { format!("; it may be in {}, which is encrypted and cannot be read", self.encrypted.join(", ")) }
+        if self.encrypted.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; it may be in {}, which is encrypted and cannot be read",
+                self.encrypted.join(", ")
+            )
+        }
     }
 
     fn model(&self, name: &str, kinds: &[&str]) -> Result<Model, String> {
         if let Some(m) = self.find_model(name) {
             if !kinds.contains(&m.kind.as_str()) {
-                return Err(format!("model '{name}' is type {}, expected {}", m.kind, kinds.join("/")));
+                return Err(format!(
+                    "model '{name}' is type {}, expected {}",
+                    m.kind,
+                    kinds.join("/")
+                ));
             }
             return Ok(m.clone());
         }
         if kinds.contains(&name) {
-            return Ok(Model { kind: name.into(), params: HashMap::new() });
+            return Ok(Model {
+                kind: name.into(),
+                params: HashMap::new(),
+            });
         }
         Err(match ltspice_lib() {
-            Some(p) => format!("unknown model '{name}' (not in the netlist, the built-ins or the LTspice library {})", p.display()),
-            None => format!("unknown model '{name}' (not built in, and no LTspice library folder found: choose it under Simulate, or set SWIFTSIM_LTSPICE_LIB)"),
+            Some(p) => format!(
+                "unknown model '{name}' (not in the netlist, the built-ins or the LTspice library {})",
+                p.display()
+            ),
+            None => format!(
+                "unknown model '{name}' (not built in, and no LTspice library folder found: choose it under Simulate, or set SWIFTSIM_LTSPICE_LIB)"
+            ),
         } + &self.enc_hint())
     }
 
     fn is_model(&self, name: &str) -> bool {
         self.find_model(name).is_some()
-            || matches!(name, "d" | "npn" | "pnp" | "nmos" | "pmos" | "njf" | "pjf" | "sw")
+            || matches!(
+                name,
+                "d" | "npn" | "pnp" | "nmos" | "pmos" | "njf" | "pjf" | "sw"
+            )
     }
 
     fn node_count(&self, kind: char, toks: &[String]) -> Result<usize, String> {
@@ -784,17 +1149,34 @@ impl Deck {
             'j' => 3,
             'e' | 'g' => {
                 let t2 = toks.get(2).map(|s| s.as_str()).unwrap_or("");
-                if matches!(t2, "value" | "table" | "laplace" | "poly") { 2 } else { 4 }
+                if matches!(t2, "value" | "table" | "laplace" | "poly") {
+                    2
+                } else {
+                    4
+                }
             }
             's' => 4,
             'q' => {
-                if toks.len() >= 5 && !self.is_model(&toks[3]) { 4 } else { 3 }
+                if toks.len() >= 5 && !self.is_model(&toks[3]) {
+                    4
+                } else {
+                    3
+                }
             }
             'm' => {
-                if toks.len() >= 4 && self.is_model(&toks[3]) { 3 } else { 4 }
+                if toks.len() >= 4 && self.is_model(&toks[3]) {
+                    3
+                } else {
+                    4
+                }
             }
             'k' => 0,
-            _ => return Err(format!("element type '{}' is not supported yet", kind.to_ascii_uppercase())),
+            _ => {
+                return Err(format!(
+                    "element type '{}' is not supported yet",
+                    kind.to_ascii_uppercase()
+                ));
+            }
         })
     }
 
@@ -814,7 +1196,9 @@ impl Deck {
         }
         let err = |e: String| format!("line {}: {e}", line.no);
         let toks = tokenize(&line.text);
-        let Some(name) = toks.first() else { return Ok(()) };
+        let Some(name) = toks.first() else {
+            return Ok(());
+        };
         let kind = name.chars().next().unwrap_or(' ');
         let full = format!("{prefix}{name}");
         let mapn = |n: &str| -> String {
@@ -831,7 +1215,11 @@ impl Deck {
             let end = rest
                 .iter()
                 .position(|t| t == "params:")
-                .or_else(|| rest.iter().position(|t| t == "=").map(|p| p.saturating_sub(1)))
+                .or_else(|| {
+                    rest.iter()
+                        .position(|t| t == "=")
+                        .map(|p| p.saturating_sub(1))
+                })
                 .unwrap_or(rest.len());
             if end == 0 {
                 return Err(err(format!("{name}: missing subcircuit name")));
@@ -840,17 +1228,31 @@ impl Deck {
             let sub = self.subckts.get(sname).ok_or_else(|| err(format!("unknown subcircuit '{sname}' (no .subckt for it in the netlist or its .lib/.include files){}", self.enc_hint())))?;
             let nodes = &rest[..end - 1];
             if nodes.len() != sub.ports.len() {
-                return Err(err(format!("{name}: {} nodes given, subcircuit '{sname}' has {} ports", nodes.len(), sub.ports.len())));
+                return Err(err(format!(
+                    "{name}: {} nodes given, subcircuit '{sname}' has {} ports",
+                    nodes.len(),
+                    sub.ports.len()
+                )));
             }
             let mut sc: Scope = (**global).clone();
             if !sub.funcs.is_empty() {
-                sc.funcs = Rc::new(global.funcs.iter().chain(&sub.funcs).map(|(k, v)| (k.clone(), v.clone())).collect());
+                sc.funcs = Rc::new(
+                    global
+                        .funcs
+                        .iter()
+                        .chain(&sub.funcs)
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                );
             }
             let mut inst = vec![];
             let mut i = end;
             while i < rest.len() {
                 if rest.get(i + 1).is_some_and(|t| t == "=") {
-                    inst.push((rest[i].clone(), rest.get(i + 2).cloned().unwrap_or_default()));
+                    inst.push((
+                        rest[i].clone(),
+                        rest.get(i + 2).cloned().unwrap_or_default(),
+                    ));
                     i += 3;
                 } else {
                     i += 1;
@@ -865,10 +1267,20 @@ impl Deck {
                     sc.insert(k.clone(), x);
                 }
             }
-            let cmap: HashMap<String, String> = sub.ports.iter().cloned().zip(nodes.iter().map(|n| mapn(n))).collect();
+            let cmap: HashMap<String, String> = sub
+                .ports
+                .iter()
+                .cloned()
+                .zip(nodes.iter().map(|n| mapn(n)))
+                .collect();
             let sc = Rc::new(sc);
             let cpre = format!("{full}.");
             for l in &sub.body {
+                if out.len() > MAX_ELEMENTS {
+                    return Err(err(format!(
+                        "subcircuits expand to more than {MAX_ELEMENTS} elements"
+                    )));
+                }
                 self.flatten(l, &cpre, &cmap, &sc, global, out, depth + 1)?;
             }
             return Ok(());
@@ -879,23 +1291,64 @@ impl Deck {
         }
         let nodes: Vec<String> = rest[..nn].iter().map(|n| mapn(n)).collect();
         let r = &rest[nn..];
-        let sigv = |a: &str, b: &str| Expr::Bin(Op::Sub, Box::new(Expr::Sig(format!("v({a})"))), Box::new(Expr::Sig(format!("v({b})"))));
+        let sigv = |a: &str, b: &str| {
+            Expr::Bin(
+                Op::Sub,
+                Box::new(Expr::Sig(format!("v({a})"))),
+                Box::new(Expr::Sig(format!("v({b})"))),
+            )
+        };
         let parse = |t: &String| Expr::parse(t).map_err(err);
-        let src = if matches!(kind, 'e' | 'f' | 'g' | 'h') && r.first().is_some_and(|t| t == "poly") {
+        let src = if matches!(kind, 'e' | 'f' | 'g' | 'h') && r.first().is_some_and(|t| t == "poly")
+        {
             // POLY(n) (a,b)… | vname… c0 c1 …: parentheses and commas are only separators
             let t: Vec<&String> = r[1..].iter().filter(|t| *t != "(" && *t != ")").collect();
-            let n = t.first().and_then(|n| n.parse::<usize>().ok()).filter(|&n| n > 0).ok_or_else(|| err(format!("{name}: bad POLY(n)")))?;
+            let n = t
+                .first()
+                .and_then(|n| n.parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .ok_or_else(|| err(format!("{name}: bad POLY(n)")))?;
             let vc = matches!(kind, 'e' | 'g');
             let k = 1 + if vc { 2 * n } else { n };
             if t.len() < k {
-                return Err(err(format!("{name}: POLY({n}) needs {} controls", if vc { "node pairs as" } else { "source names as" })));
+                return Err(err(format!(
+                    "{name}: POLY({n}) needs {} controls",
+                    if vc {
+                        "node pairs as"
+                    } else {
+                        "source names as"
+                    }
+                )));
             }
-            let x: Vec<Expr> = if vc { t[1..k].chunks(2).map(|p| sigv(p[0], p[1])).collect() } else { t[1..k].iter().map(|v| Expr::Sig(format!("i({v})"))).collect() };
-            let c = t[k..].iter().map(|c| parse(c)).collect::<Result<Vec<_>, _>>()?;
+            let x: Vec<Expr> = if vc {
+                t[1..k].chunks(2).map(|p| sigv(p[0], p[1])).collect()
+            } else {
+                t[1..k]
+                    .iter()
+                    .map(|v| Expr::Sig(format!("i({v})")))
+                    .collect()
+            };
+            let c = t[k..]
+                .iter()
+                .map(|c| parse(c))
+                .collect::<Result<Vec<_>, _>>()?;
             Some((matches!(kind, 'e' | 'h'), poly(&x, &c)))
-        } else if let (true, Some(i)) = (matches!(kind, 'e' | 'g'), r.iter().position(|t| t == "table")) {
+        } else if let (true, Some(i)) = (
+            matches!(kind, 'e' | 'g'),
+            r.iter().position(|t| t == "table"),
+        ) {
             // nc+ nc- table=(x,y …)  or  table {expr} = (x,y) …
-            let (x, pts) = if nn == 4 { (sigv(&rest[2], &rest[3]), i + 2) } else { (parse(r.get(i + 1).ok_or_else(|| err(format!("{name}: table needs an input")))?)?, i + 3) };
+            let (x, pts) = if nn == 4 {
+                (sigv(&rest[2], &rest[3]), i + 2)
+            } else {
+                (
+                    parse(
+                        r.get(i + 1)
+                            .ok_or_else(|| err(format!("{name}: table needs an input")))?,
+                    )?,
+                    i + 3,
+                )
+            };
             let mut a = vec![x];
             for t in r.iter().skip(pts).filter(|t| *t != "(" && *t != ")") {
                 a.push(parse(t)?);
@@ -903,11 +1356,19 @@ impl Deck {
             Some((kind == 'e', Expr::Call("table".into(), a)))
         } else if kind == 'b' || (matches!(kind, 'e' | 'g') && nn == 2) {
             let r = after_words(&line.text, 3);
-            let is_v = if kind == 'b' { r.starts_with('v') } else { kind == 'e' };
-            if (kind == 'b' && !(r.starts_with('v') || r.starts_with('i'))) || (kind != 'b' && !r.starts_with("value")) {
+            let is_v = if kind == 'b' {
+                r.starts_with('v')
+            } else {
+                kind == 'e'
+            };
+            if (kind == 'b' && !(r.starts_with('v') || r.starts_with('i')))
+                || (kind != 'b' && !r.starts_with("value"))
+            {
                 return Err(err(format!("{name}: expected V=<expr> or I=<expr>")));
             }
-            let eq = r.find('=').ok_or_else(|| err(format!("{name}: missing '='")))?;
+            let eq = r
+                .find('=')
+                .ok_or_else(|| err(format!("{name}: missing '='")))?;
             Some((is_v, Expr::parse(r[eq + 1..].trim()).map_err(err)?))
         } else {
             None
@@ -922,7 +1383,12 @@ impl Deck {
             }
         };
         let expr = match src {
-            Some((is_v, e)) => Some((is_v, e.inline(&scope.funcs).map_err(err)?.resolve(&|n| scope.get(n).copied(), &sig))),
+            Some((is_v, e)) => Some((
+                is_v,
+                e.inline(&scope.funcs)
+                    .map_err(err)?
+                    .resolve(&|n| scope.get(n).copied(), &sig),
+            )),
             None => None,
         };
         let mut toks: Vec<String> = r.to_vec();
@@ -934,7 +1400,15 @@ impl Deck {
             }
             _ => {}
         }
-        out.push(Flat { line: line.no, kind, name: full, nodes, toks, scope: scope.clone(), expr });
+        out.push(Flat {
+            line: line.no,
+            kind,
+            name: full,
+            nodes,
+            toks,
+            scope: scope.clone(),
+            expr,
+        });
         Ok(())
     }
 
@@ -952,12 +1426,31 @@ impl Deck {
         let opts = self.options();
         let temp = global["temp"] + 273.15;
         let tnom = opts.tnom + 273.15;
-        let mut b = Builder { deck: self, over, temp, tnom, nodes: HashMap::new(), node_names: vec![], internal: vec![], devs: vec![], inds: vec![], ks: vec![], warnings: vec![] };
+        let mut b = Builder {
+            deck: self,
+            over,
+            temp,
+            tnom,
+            nodes: HashMap::new(),
+            node_names: vec![],
+            internal: vec![],
+            devs: vec![],
+            inds: vec![],
+            ks: vec![],
+            warnings: vec![],
+        };
         for f in &flat {
-            b.element(f).map_err(|e| format!("line {} ({}): {e}", f.line, f.name))?;
+            b.element(f)
+                .map_err(|e| format!("line {} ({}): {e}", f.line, f.name))?;
         }
         for (l1, l2, k) in std::mem::take(&mut b.ks) {
-            let lv = |n: &str| b.inds.iter().find(|i| i.name == n).map(|i| i.l).ok_or(format!("K: unknown inductor '{n}'"));
+            let lv = |n: &str| {
+                b.inds
+                    .iter()
+                    .find(|i| i.name == n)
+                    .map(|i| i.l)
+                    .ok_or(format!("K: unknown inductor '{n}'"))
+            };
             let m = k * (lv(&l1)? * lv(&l2)?).sqrt();
             for ind in b.inds.iter_mut() {
                 if ind.name == l1 {
@@ -991,10 +1484,20 @@ impl Deck {
             let t = tokenize(&l.text);
             let mut i = 1;
             while i < t.len() {
-                if t[i] == "v" && t.get(i + 1).is_some_and(|x| x == "(") && t.get(i + 4).is_some_and(|x| x == "=") {
+                if t[i] == "v"
+                    && t.get(i + 1).is_some_and(|x| x == "(")
+                    && t.get(i + 4).is_some_and(|x| x == "=")
+                {
                     let node = &t[i + 2];
-                    let idx = *s.nodes.get(node.as_str()).ok_or(format!("line {}: .ic unknown node '{node}'", l.no))?;
-                    let v = eval_str(t.get(i + 5).ok_or(format!("line {}: .ic missing value", l.no))?, &global)?;
+                    let idx = *s
+                        .nodes
+                        .get(node.as_str())
+                        .ok_or(format!("line {}: .ic unknown node '{node}'", l.no))?;
+                    let v = eval_str(
+                        t.get(i + 5)
+                            .ok_or(format!("line {}: .ic missing value", l.no))?,
+                        &global,
+                    )?;
                     ics.push((idx, v));
                     i += 6;
                 } else {
@@ -1025,7 +1528,14 @@ impl Deck {
     }
 }
 
-fn read_lines(raw: &[&str], offset: usize, base: Option<&Path>, out: &mut Vec<Line>, deck: &mut Deck, depth: usize) -> Result<(), String> {
+fn read_lines(
+    raw: &[&str],
+    offset: usize,
+    base: Option<&Path>,
+    out: &mut Vec<Line>,
+    deck: &mut Deck,
+    depth: usize,
+) -> Result<(), String> {
     if depth > 10 {
         return Err("includes nested too deeply".into());
     }
@@ -1053,21 +1563,37 @@ fn read_lines(raw: &[&str], offset: usize, base: Option<&Path>, out: &mut Vec<Li
             let arg = t[word.len()..].trim();
             let (path, section) = if arg.starts_with('"') {
                 let end = arg[1..].find('"').map_or(arg.len(), |e| e + 1);
-                (arg[1..end].to_string(), arg[(end + 1).min(arg.len())..].trim().to_ascii_lowercase())
+                (
+                    arg[1..end].to_string(),
+                    arg[(end + 1).min(arg.len())..].trim().to_ascii_lowercase(),
+                )
             } else {
                 match arg.rsplit_once(char::is_whitespace) {
-                    Some((p, s)) if word == ".lib" => (p.trim().to_string(), s.to_ascii_lowercase()),
+                    Some((p, s)) if word == ".lib" => {
+                        (p.trim().to_string(), s.to_ascii_lowercase())
+                    }
                     _ => (arg.to_string(), String::new()),
                 }
             };
             // LTspice netlists may use Windows separators
-            let rel = PathBuf::from(if cfg!(windows) { path.clone() } else { path.replace('\\', "/") });
-            let mut tries = vec![if rel.is_absolute() { rel.clone() } else { base.map_or(rel.clone(), |b| b.join(&rel)) }];
+            let rel = PathBuf::from(if cfg!(windows) {
+                path.clone()
+            } else {
+                path.replace('\\', "/")
+            });
+            let mut tries = vec![if rel.is_absolute() {
+                rel.clone()
+            } else {
+                base.map_or(rel.clone(), |b| b.join(&rel))
+            }];
             // like LTspice, relative names also resolve in its lib/sub and lib/cmp folders
             if let (false, Some(lt)) = (rel.is_absolute(), ltspice_lib()) {
                 tries.extend(["sub", "cmp", ""].map(|d| lt.join(d).join(&rel)));
             }
-            let Some((text, p)) = tries.into_iter().find_map(|p| Some((decode(&std::fs::read(&p).ok()?), p))) else {
+            let Some((text, p)) = tries
+                .into_iter()
+                .find_map(|p| Some((decode(&std::fs::read(&p).ok()?), p)))
+            else {
                 deck.warnings.push(format!("line {no}: library '{path}' not found, ignored (built-in models are still available)"));
                 continue;
             };
@@ -1084,7 +1610,10 @@ fn read_lines(raw: &[&str], offset: usize, base: Option<&Path>, out: &mut Vec<Li
                 lines
                     .into_iter()
                     .filter(|l| {
-                        let w: Vec<String> = l.split_whitespace().map(|s| s.to_ascii_lowercase()).collect();
+                        let w: Vec<String> = l
+                            .split_whitespace()
+                            .map(|s| s.to_ascii_lowercase())
+                            .collect();
                         if w.first().is_some_and(|f| f == ".lib") && w.get(1) == Some(&section) {
                             on = true;
                             return false;
@@ -1149,7 +1678,10 @@ fn split_kv(toks: &[String]) -> (Vec<&str>, HashMap<&str, &str>) {
     (pos, kv)
 }
 
-fn source_spec(toks: &[String], sc: &Scope) -> Result<(Option<f64>, Option<Wave>, C64, HashMap<String, f64>), String> {
+fn source_spec(
+    toks: &[String],
+    sc: &Scope,
+) -> Result<(Option<f64>, Option<Wave>, C64, HashMap<String, f64>), String> {
     let (mut dc, mut wave, mut ac, mut kv) = (None, None, C64::default(), HashMap::new());
     let num = |s: &str| eval_str(s, sc);
     let mut i = 0;
@@ -1169,7 +1701,10 @@ fn source_spec(toks: &[String], sc: &Scope) -> Result<(Option<f64>, Option<Wave>
                 let mag = num(toks.get(i + 1).ok_or("AC needs a magnitude")?)?;
                 i += 2;
                 let mut ph = 0.0;
-                if let Some(p) = toks.get(i).filter(|_| toks.get(i + 1).is_none_or(|x| x != "=")) {
+                if let Some(p) = toks
+                    .get(i)
+                    .filter(|_| toks.get(i + 1).is_none_or(|x| x != "="))
+                {
                     if let Ok(v) = num(p) {
                         ph = v;
                         i += 1;
@@ -1183,7 +1718,10 @@ fn source_spec(toks: &[String], sc: &Scope) -> Result<(Option<f64>, Option<Wave>
                 if toks.get(i).is_some_and(|x| x == "(") {
                     i += 1;
                     while i < toks.len() && toks[i] != ")" {
-                        args.push(num(&toks[i]).map_err(|e| format!("{} argument: {e}", t.to_uppercase()))?);
+                        args.push(
+                            num(&toks[i])
+                                .map_err(|e| format!("{} argument: {e}", t.to_uppercase()))?,
+                        );
                         i += 1;
                     }
                     i += 1;
@@ -1248,14 +1786,21 @@ impl Builder<'_> {
             if let Some(v) = ov {
                 return Ok(v);
             }
-            num(pos.first().copied().or(kv.get(key).copied()).ok_or("missing value")?)
+            num(pos
+                .first()
+                .copied()
+                .or(kv.get(key).copied())
+                .ok_or("missing value")?)
         };
         let name = f.name.clone();
         match f.kind {
             'r' => {
                 // LTspice also writes `tc=tc1,tc2`
                 let tc1 = kv.get("tc1").or(kv.get("tc")).map_or(Ok(0.0), |v| num(v))?;
-                let tc2 = kv.get("tc2").or(pos.get(1).filter(|_| kv.contains_key("tc"))).map_or(Ok(0.0), |v| num(v))?;
+                let tc2 = kv
+                    .get("tc2")
+                    .or(pos.get(1).filter(|_| kv.contains_key("tc")))
+                    .map_or(Ok(0.0), |v| num(v))?;
                 let dt = self.temp - self.tnom;
                 let r = value("r")? * (1.0 + tc1 * dt + tc2 * dt * dt);
                 let r = if r.abs() < 1e-9 { 1e-9 } else { r };
@@ -1269,14 +1814,31 @@ impl Builder<'_> {
                 if rpar > 0.0 {
                     self.res(format!("{name}#rpar"), nd[0], nd[1], rpar);
                 }
-                self.devs.push(Box::new(Capacitor { name, a, b: nd[1], c, ic, s: 0 }));
+                self.devs.push(Box::new(Capacitor {
+                    name,
+                    a,
+                    b: nd[1],
+                    c,
+                    ic,
+                    s: 0,
+                }));
             }
             'l' => {
                 let l = value("l")?;
                 let ic = kv.get("ic").map(|v| num(v)).transpose()?;
                 // LTSpice gives inductors 1 mΩ series resistance by default
                 let b = self.series(&name, "s", nd[1], kvn("rser", 1e-3)?);
-                self.inds.push(Inductor { name, a: nd[0], b, l, ic, k: 0, s: 0, coupling: vec![], coup: vec![] });
+                self.inds.push(Inductor {
+                    name,
+                    a: nd[0],
+                    b,
+                    l,
+                    ic,
+                    k: 0,
+                    s: 0,
+                    coupling: vec![],
+                    coup: vec![],
+                });
             }
             'v' | 'i' => {
                 let (dc, mut wave, ac, ex) = source_spec(&f.toks, &sc)?;
@@ -1287,13 +1849,32 @@ impl Builder<'_> {
                 }
                 if f.kind == 'v' {
                     let rser = ex.get("rser").copied().unwrap_or(0.0);
-                    self.devs.push(Box::new(VSource { name, a: nd[0], b: nd[1], k: 0, dc, wave, ac, rser }));
+                    self.devs.push(Box::new(VSource {
+                        name,
+                        a: nd[0],
+                        b: nd[1],
+                        k: 0,
+                        dc,
+                        wave,
+                        ac,
+                        rser,
+                    }));
                 } else {
-                    self.devs.push(Box::new(ISource { name, a: nd[0], b: nd[1], dc, wave, ac }));
+                    self.devs.push(Box::new(ISource {
+                        name,
+                        a: nd[0],
+                        b: nd[1],
+                        dc,
+                        wave,
+                        ac,
+                        s: 0,
+                    }));
                 }
             }
             'd' => {
-                let m = self.deck.model(pos.first().ok_or("missing model")?, &["d"])?;
+                let m = self
+                    .deck
+                    .model(pos.first().ok_or("missing model")?, &["d"])?;
                 let area = pos.get(1).map_or(kvn("area", 1.0), |v| num(v))?;
                 let g = |k: &[&str], d: f64| mparam(&m, k, d, &sc);
                 let n = g(&["n"], 1.0)?;
@@ -1315,10 +1896,19 @@ impl Builder<'_> {
                 };
                 md.set_temp(self.temp, self.tnom, g(&["eg"], 1.11)?, g(&["xti"], 3.0)?);
                 let a = self.series(&name, "a", nd[0], g(&["rs"], 0.0)? / area);
-                self.devs.push(Box::new(Diode { name, a, k: nd[1], md, s: 0, vd_old: 0.0 }));
+                self.devs.push(Box::new(Diode {
+                    name,
+                    a,
+                    k: nd[1],
+                    md,
+                    s: 0,
+                    vd_old: 0.0,
+                }));
             }
             'q' => {
-                let m = self.deck.model(pos.first().ok_or("missing model")?, &["npn", "pnp"])?;
+                let m = self
+                    .deck
+                    .model(pos.first().ok_or("missing model")?, &["npn", "pnp"])?;
                 let area = pos.get(1).map_or(kvn("area", 1.0), |v| num(v))?;
                 let g = |k: &[&str], d: f64| mparam(&m, k, d, &sc);
                 let inf0 = |v: f64| if v > 0.0 { v } else { f64::INFINITY };
@@ -1350,18 +1940,40 @@ impl Builder<'_> {
                     kf: g(&["kf"], 0.0)?,
                     af: g(&["af"], 1.0)?,
                 };
-                md.set_temp(self.temp, self.tnom, g(&["eg"], 1.11)?, g(&["xti", "pt"], 3.0)?, g(&["xtb"], 0.0)?);
+                md.set_temp(
+                    self.temp,
+                    self.tnom,
+                    g(&["eg"], 1.11)?,
+                    g(&["xti", "pt"], 3.0)?,
+                    g(&["xtb"], 0.0)?,
+                );
                 let c = self.series(&name, "c", nd[0], g(&["rc"], 0.0)? / area);
                 let b = self.series(&name, "b", nd[1], g(&["rb"], 0.0)? / area);
                 let e = self.series(&name, "e", nd[2], g(&["re"], 0.0)? / area);
-                self.devs.push(Box::new(Bjt { name, c, b, e, md, s: 0, vbe_old: 0.0, vbc_old: 0.0 }));
+                self.devs.push(Box::new(Bjt {
+                    name,
+                    c,
+                    b,
+                    e,
+                    md,
+                    s: 0,
+                    vbe_old: 0.0,
+                    vbc_old: 0.0,
+                }));
             }
             'm' => {
-                let m = self.deck.model(pos.first().ok_or("missing model")?, &["nmos", "pmos", "vdmos"])?;
+                let m = self.deck.model(
+                    pos.first().ok_or("missing model")?,
+                    &["nmos", "pmos", "vdmos"],
+                )?;
                 let g = |k: &[&str], d: f64| mparam(&m, k, d, &sc);
                 let (d, gt, s) = (nd[0], nd[1], nd[2]);
                 if m.kind == "vdmos" {
-                    let pol = if m.params.contains_key("pchan") { -1.0 } else { 1.0 };
+                    let pol = if m.params.contains_key("pchan") {
+                        -1.0
+                    } else {
+                        1.0
+                    };
                     let mult = kvn("m", 1.0)?;
                     let cmax = g(&["cgdmax"], 0.0)?;
                     let cmin = g(&["cgdmin"], cmax)?;
@@ -1390,7 +2002,19 @@ impl Builder<'_> {
                     };
                     // shortcut: VDMOS only scales KP with temperature (VTO fixed, no Vtotc/Bex)
                     let beta = g(&["kp"], 1.0)? * mult * (self.temp / self.tnom).powf(-1.5);
-                    self.devs.push(Box::new(Mos { name: name.clone(), d: di, g: gi, s: si, b: si, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0, bulk: vec![] }));
+                    self.devs.push(Box::new(Mos {
+                        name: name.clone(),
+                        d: di,
+                        g: gi,
+                        s: si,
+                        b: si,
+                        beta,
+                        md,
+                        st: 0,
+                        vgs_old: 0.0,
+                        vds_old: 0.0,
+                        bulk: vec![],
+                    }));
                     let bv = g(&["bv"], 0.0)?;
                     let n = g(&["n"], 1.0)?;
                     let mut dm = DiodeModel {
@@ -1411,11 +2035,21 @@ impl Builder<'_> {
                     dm.set_temp(self.temp, self.tnom, g(&["eg"], 1.11)?, g(&["xti"], 3.0)?);
                     let (an, ca) = if pol > 0.0 { (s, d) } else { (d, s) };
                     let an = self.series(&name, "body", an, g(&["rb"], 0.0)? / mult);
-                    self.devs.push(Box::new(Diode { name: format!("{name}#body"), a: an, k: ca, md: dm, s: 0, vd_old: 0.0 }));
+                    self.devs.push(Box::new(Diode {
+                        name: format!("{name}#body"),
+                        a: an,
+                        k: ca,
+                        md: dm,
+                        s: 0,
+                        vd_old: 0.0,
+                    }));
                 } else {
                     let level = g(&["level"], 1.0)?;
                     if level != 1.0 {
-                        let w = format!("model '{}' is level {level}; simulated with the level-1 equations (approximate)", pos[0]);
+                        let w = format!(
+                            "model '{}' is level {level}; simulated with the level-1 equations (approximate)",
+                            pos[0]
+                        );
                         if !self.warnings.contains(&w) {
                             self.warnings.push(w);
                         }
@@ -1425,7 +2059,11 @@ impl Builder<'_> {
                     let l = kvn("l", 100e-6)?;
                     let mult = kvn("m", 1.0)?;
                     let tox = g(&["tox"], 0.0)?;
-                    let kp_def = if tox > 0.0 { g(&["u0", "uo"], 600.0)? * 1e-4 * 3.453e-11 / tox } else { 2e-5 };
+                    let kp_def = if tox > 0.0 {
+                        g(&["u0", "uo"], 600.0)? * 1e-4 * 3.453e-11 / tox
+                    } else {
+                        2e-5
+                    };
                     let mut md = MosModel {
                         pol: if m.kind == "pmos" { -1.0 } else { 1.0 },
                         vto: g(&["vto", "vt0"], 0.0)?,
@@ -1465,11 +2103,25 @@ impl Builder<'_> {
                         mos_junction(format!("{name}#{tag}"), a, k, is, temp, tnom)
                     };
                     let bulk = vec![junction("bd", di), junction("bs", si)];
-                    self.devs.push(Box::new(Mos { name, d: di, g: gt, s: si, b, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0, bulk }));
+                    self.devs.push(Box::new(Mos {
+                        name,
+                        d: di,
+                        g: gt,
+                        s: si,
+                        b,
+                        beta,
+                        md,
+                        st: 0,
+                        vgs_old: 0.0,
+                        vds_old: 0.0,
+                        bulk,
+                    }));
                 }
             }
             'j' => {
-                let m = self.deck.model(pos.first().ok_or("missing model")?, &["njf", "pjf"])?;
+                let m = self
+                    .deck
+                    .model(pos.first().ok_or("missing model")?, &["njf", "pjf"])?;
                 let area = pos.get(1).map_or(kvn("area", 1.0), |v| num(v))?;
                 let g = |k: &[&str], d: f64| mparam(&m, k, d, &sc);
                 let pol = if m.kind == "pjf" { -1.0 } else { 1.0 };
@@ -1477,38 +2129,133 @@ impl Builder<'_> {
                 let di = self.series(&name, "d", nd[0], g(&["rd"], 0.0)? / area);
                 let si = self.series(&name, "s", nd[2], g(&["rs"], 0.0)? / area);
                 // SPICE uses VTO unsigned for both polarities; Mos multiplies it by pol
-                let md = MosModel { pol, vto: pol * g(&["vto", "vt0"], -2.0)?, kp: 0.0, gamma: 0.0, phi: 0.6, lambda: g(&["lambda"], 0.0)?, cgs: 0.0, cgd: 0.0, cbd: 0.0, cbs: 0.0, ksub: 0.0, kf: g(&["kf"], 0.0)?, af: g(&["af"], 1.0)?, fden: 1.0, fgm: false };
+                let md = MosModel {
+                    pol,
+                    vto: pol * g(&["vto", "vt0"], -2.0)?,
+                    kp: 0.0,
+                    gamma: 0.0,
+                    phi: 0.6,
+                    lambda: g(&["lambda"], 0.0)?,
+                    cgs: 0.0,
+                    cgd: 0.0,
+                    cbd: 0.0,
+                    cbs: 0.0,
+                    ksub: 0.0,
+                    kf: g(&["kf"], 0.0)?,
+                    af: g(&["af"], 1.0)?,
+                    fden: 1.0,
+                    fgm: false,
+                };
                 let beta = 2.0 * g(&["beta"], 1e-4)? * area;
-                let ch = Mos { name: name.clone(), d: di, g: gt, s: si, b: si, beta, md, st: 0, vgs_old: 0.0, vds_old: 0.0, bulk: vec![] };
+                let ch = Mos {
+                    name: name.clone(),
+                    d: di,
+                    g: gt,
+                    s: si,
+                    b: si,
+                    beta,
+                    md,
+                    st: 0,
+                    vgs_old: 0.0,
+                    vds_old: 0.0,
+                    bulk: vec![],
+                };
                 let (temp, tnom) = (self.temp, self.tnom);
                 // gate junctions scale with temperature like diodes; channel VTO/BETA stay fixed (SPICE3)
                 let junction = |tag: &str, ch: usize, c: f64| -> Result<Diode, String> {
-                    let mut md = DiodeModel { is: g(&["is"], 1e-14)? * area, n: g(&["n"], 1.0)?, cjo: c * area, vj: g(&["pb"], 1.0)?, m: g(&["m"], 0.5)?, tt: 0.0, bv: f64::INFINITY, ibv: 1e-3, nbv: 1.0, fc: g(&["fc"], 0.5)?, vt: VT, kf: 0.0, af: 1.0 };
+                    let mut md = DiodeModel {
+                        is: g(&["is"], 1e-14)? * area,
+                        n: g(&["n"], 1.0)?,
+                        cjo: c * area,
+                        vj: g(&["pb"], 1.0)?,
+                        m: g(&["m"], 0.5)?,
+                        tt: 0.0,
+                        bv: f64::INFINITY,
+                        ibv: 1e-3,
+                        nbv: 1.0,
+                        fc: g(&["fc"], 0.5)?,
+                        vt: VT,
+                        kf: 0.0,
+                        af: 1.0,
+                    };
                     md.set_temp(temp, tnom, g(&["eg"], 1.11)?, g(&["xti"], 3.0)?);
                     let (a, k) = if pol > 0.0 { (gt, ch) } else { (ch, gt) };
-                    Ok(Diode { name: format!("{name}#{tag}"), a, k, md, s: 0, vd_old: 0.0 })
+                    Ok(Diode {
+                        name: format!("{name}#{tag}"),
+                        a,
+                        k,
+                        md,
+                        s: 0,
+                        vd_old: 0.0,
+                    })
                 };
-                let (gs, gd) = (junction("gs", si, g(&["cgs"], 0.0)?)?, junction("gd", di, g(&["cgd"], 0.0)?)?);
+                let (gs, gd) = (
+                    junction("gs", si, g(&["cgs"], 0.0)?)?,
+                    junction("gd", di, g(&["cgd"], 0.0)?)?,
+                );
                 self.devs.push(Box::new(Jfet { name, ch, gs, gd }));
             }
             'e' | 'g' | 'f' | 'h' => {
                 if let Some((is_v, e)) = &f.expr {
-                    self.devs.push(Box::new(BSource { name, a: nd[0], b: nd[1], is_v: *is_v, expr: e.clone(), bound: Expr::Num(0.0), deps: vec![], k: 0 }));
+                    self.devs.push(Box::new(BSource {
+                        name,
+                        a: nd[0],
+                        b: nd[1],
+                        is_v: *is_v,
+                        expr: e.clone(),
+                        bound: Expr::Num(0.0),
+                        deps: vec![],
+                        k: 0,
+                        s: 0,
+                    }));
                     return Ok(());
                 }
                 let (cp, cn, ctrl, gain) = if matches!(f.kind, 'e' | 'g') {
-                    (nd[2], nd[3], String::new(), num(pos.first().ok_or("missing gain")?)?)
+                    (
+                        nd[2],
+                        nd[3],
+                        String::new(),
+                        num(pos.first().ok_or("missing gain")?)?,
+                    )
                 } else {
-                    (0, 0, pos.first().ok_or("missing controlling source")?.to_string(), num(pos.get(1).ok_or("missing gain")?)?)
+                    (
+                        0,
+                        0,
+                        pos.first().ok_or("missing controlling source")?.to_string(),
+                        num(pos.get(1).ok_or("missing gain")?)?,
+                    )
                 };
-                self.devs.push(Box::new(Controlled { name, kind: f.kind, a: nd[0], b: nd[1], cp, cn, ctrl, kc: 0, gain, k: 0 }));
+                self.devs.push(Box::new(Controlled {
+                    name,
+                    kind: f.kind,
+                    a: nd[0],
+                    b: nd[1],
+                    cp,
+                    cn,
+                    ctrl,
+                    kc: 0,
+                    gain,
+                    k: 0,
+                }));
             }
             'b' => {
                 let (is_v, e) = f.expr.clone().ok_or("missing expression")?;
-                self.devs.push(Box::new(BSource { name, a: nd[0], b: nd[1], is_v, expr: e, bound: Expr::Num(0.0), deps: vec![], k: 0 }));
+                self.devs.push(Box::new(BSource {
+                    name,
+                    a: nd[0],
+                    b: nd[1],
+                    is_v,
+                    expr: e,
+                    bound: Expr::Num(0.0),
+                    deps: vec![],
+                    k: 0,
+                    s: 0,
+                }));
             }
             's' => {
-                let m = self.deck.model(pos.first().ok_or("missing model")?, &["sw"])?;
+                let m = self
+                    .deck
+                    .model(pos.first().ok_or("missing model")?, &["sw"])?;
                 let g = |k: &[&str], d: f64| mparam(&m, k, d, &sc);
                 let ron = g(&["ron"], 1.0)?.max(1e-9);
                 let roff = g(&["roff"], 1e12)?;
@@ -1544,16 +2291,30 @@ impl Builder<'_> {
 /// SPICE POLY polynomial: c0 + Σ ci·xi + Σ cij·xi·xj (i ≤ j, lexicographic) + … cubic …
 fn poly(x: &[Expr], c: &[Expr]) -> Expr {
     // a lone POLY(1) coefficient is the linear gain
-    let c = if x.len() == 1 && c.len() == 1 { vec![Expr::Num(0.0), c[0].clone()] } else { c.to_vec() };
+    let c = if x.len() == 1 && c.len() == 1 {
+        vec![Expr::Num(0.0), c[0].clone()]
+    } else {
+        c.to_vec()
+    };
     let (mut terms, mut level): (Vec<Vec<usize>>, Vec<Vec<usize>>) = (vec![], vec![vec![]]);
     while terms.len() < c.len() {
         terms.extend(level.iter().cloned());
-        level = level.iter().flat_map(|t| (t.last().copied().unwrap_or(0)..x.len()).map(move |j| [t.as_slice(), &[j]].concat())).collect();
+        level = level
+            .iter()
+            .flat_map(|t| {
+                (t.last().copied().unwrap_or(0)..x.len())
+                    .map(move |j| [t.as_slice(), &[j]].concat())
+            })
+            .collect();
     }
     c.iter()
         .zip(&terms)
         .filter(|(k, _)| !matches!(k, Expr::Num(v) if *v == 0.0))
-        .map(|(k, t)| t.iter().fold(k.clone(), |a, &j| Expr::Bin(Op::Mul, Box::new(a), Box::new(x[j].clone()))))
+        .map(|(k, t)| {
+            t.iter().fold(k.clone(), |a, &j| {
+                Expr::Bin(Op::Mul, Box::new(a), Box::new(x[j].clone()))
+            })
+        })
         .reduce(|a, b| Expr::Bin(Op::Add, Box::new(a), Box::new(b)))
         .unwrap_or(Expr::Num(0.0))
 }
@@ -1571,8 +2332,54 @@ fn mparam(m: &Model, keys: &[&str], def: f64, sc: &Scope) -> Result<f64, String>
 mod tests {
     use super::*;
     #[test]
+    fn numeric_params_are_listed_and_rewritten() {
+        let t = "title\n.param Rload=4k7 gain = 10 ; note\n.PARAM tau {r*c} f 1meg\n.step param x 1 2 1\n.param x=3\n.subckt s a\n.param inner=1\n.ends\n.param gain=20\n";
+        let p = numeric_params(t);
+        assert_eq!(
+            p,
+            [
+                ("Rload".to_string(), 4700.0),
+                ("f".to_string(), 1e6),
+                ("gain".to_string(), 20.0)
+            ]
+        );
+        let s = set_params(
+            t,
+            &[
+                ("rload".into(), 2200.0),
+                ("GAIN".into(), 0.5),
+                ("tau".into(), 1.0),
+                ("inner".into(), 9.0),
+            ],
+        );
+        assert_eq!(
+            s,
+            "title\n.param Rload=2.2k gain = 500m ; note\n.PARAM tau {r*c} f 1meg\n.step param x 1 2 1\n.param x=3\n.subckt s a\n.param inner=1\n.ends\n.param gain=500m\n"
+        );
+        for v in [1e6, 4.7e3, 1e-5, 123456.0, -0.25, 3.3, 999.9999, 1.0 / 3.0] {
+            let back = parse_number(&fmt_spice(v)).unwrap();
+            assert!(
+                (back - v).abs() <= 1e-5 * v.abs(),
+                "{v} -> {} -> {back}",
+                fmt_spice(v)
+            );
+        }
+        assert_eq!(
+            (
+                fmt_spice(1e6).as_str(),
+                fmt_spice(1e-6).as_str(),
+                fmt_spice(150.0).as_str()
+            ),
+            ("1meg", "1u", "150")
+        );
+    }
+
+    #[test]
     fn tokens_and_assignments() {
-        assert_eq!(tokenize("v1 a 0 pulse(0 {vh*2} 1n)"), ["v1", "a", "0", "pulse", "(", "0", "{vh*2}", "1n", ")"]);
+        assert_eq!(
+            tokenize("v1 a 0 pulse(0 {vh*2} 1n)"),
+            ["v1", "a", "0", "pulse", "(", "0", "{vh*2}", "1n", ")"]
+        );
         let a = parse_assignments("r=1k c = {1/(2*pi*f*r)} f=1meg");
         assert_eq!(a[0], ("r".into(), "1k".into()));
         assert_eq!(a[1], ("c".into(), "{1/(2*pi*f*r)}".into()));
@@ -1590,7 +2397,14 @@ mod tests {
         let sc = d.eval_params(&HashMap::new()).unwrap();
         assert_eq!((sc["vid"], sc["f"]), (0.001, 1000.0));
         let m = d.model("q2", &["npn"]).unwrap();
-        assert_eq!((m.params["bf"].as_str(), m.params["vaf"].as_str(), m.params.get("ako")), ("200", "80", None));
+        assert_eq!(
+            (
+                m.params["bf"].as_str(),
+                m.params["vaf"].as_str(),
+                m.params.get("ako")
+            ),
+            ("200", "80", None)
+        );
     }
 
     // a stand-in LTspice lib folder written by the test (LTspice's own files are never copied here)
@@ -1600,28 +2414,66 @@ mod tests {
         std::fs::create_dir_all(lib.join("cmp")).unwrap();
         std::fs::create_dir_all(lib.join("sub")).unwrap();
         std::fs::write(lib.join("cmp/standard.bjt"), ".model LTONLY1 NPN(IS=1E-14 BF=123\n+ VAF=100) ; comment\n.model LTONLY2 ako:LTONLY1 NPN(VAF=50 mfg=Test)\n").unwrap();
-        std::fs::write(lib.join("sub/ltdiv.sub"), ".subckt ltdiv a b\nR1 a b 1k\n.ends ltdiv\n").unwrap();
-        std::fs::write(lib.join("sub/secret.lib"), "* LTspice Encrypted File\n*\n* Begin:\n  A3 1D 22 9F\n").unwrap();
+        std::fs::write(
+            lib.join("sub/ltdiv.sub"),
+            ".subckt ltdiv a b\nR1 a b 1k\n.ends ltdiv\n",
+        )
+        .unwrap();
+        std::fs::write(
+            lib.join("sub/secret.lib"),
+            "* LTspice Encrypted File\n*\n* Begin:\n  A3 1D 22 9F\n",
+        )
+        .unwrap();
         assert!(is_encrypted("$CDNENCSTART\nabc\n$CDNENCFINISH"));
 
         set_ltspice_lib(Some(lib.clone()));
-        let net = "t\n.lib ltdiv.sub\n.lib secret.lib\nV1 c 0 5\nQ1 c c 0 LTONLY2\nX1 c 0 ltdiv\n.op\n";
+        let net =
+            "t\n.lib ltdiv.sub\n.lib secret.lib\nV1 c 0 5\nQ1 c c 0 LTONLY2\nX1 c 0 ltdiv\n.op\n";
         let d = Deck::parse(net, None).unwrap();
         let built = d.build(&HashMap::new()).map(|_| ());
         let m = d.model("ltonly2", &["npn"]);
         let missing = Deck::parse("t\nX1 a 0 secretpart\nD1 a 0 nosuchdiode\n", None).unwrap();
-        let (sub_err, model_err) = (missing.build(&HashMap::new()).err().unwrap_or_default(), missing.model("nosuchdiode", &["d"]).err().unwrap_or_default());
-        let missing_enc = Deck::parse("t\n.lib secret.lib\nX1 a 0 secretpart\n", None).unwrap().build(&HashMap::new()).err().unwrap_or_default();
+        let (sub_err, model_err) = (
+            missing.build(&HashMap::new()).err().unwrap_or_default(),
+            missing
+                .model("nosuchdiode", &["d"])
+                .err()
+                .unwrap_or_default(),
+        );
+        let missing_enc = Deck::parse("t\n.lib secret.lib\nX1 a 0 secretpart\n", None)
+            .unwrap()
+            .build(&HashMap::new())
+            .err()
+            .unwrap_or_default();
         set_ltspice_lib(None);
         std::fs::remove_dir_all(&lib).ok();
 
         built.unwrap();
         let m = m.unwrap();
-        assert_eq!((m.params["bf"].as_str(), m.params["vaf"].as_str()), ("123", "50"));
+        assert_eq!(
+            (m.params["bf"].as_str(), m.params["vaf"].as_str()),
+            ("123", "50")
+        );
         assert!(d.subckts.contains_key("ltdiv"), "{:?}", d.warnings);
-        assert!(d.warnings.iter().any(|w| w.contains("'secret.lib' is vendor-encrypted")), "{:?}", d.warnings);
-        assert!(sub_err.contains("unknown subcircuit 'secretpart'") && !sub_err.contains("encrypted"), "{sub_err}");
-        assert!(model_err.contains("unknown model 'nosuchdiode'") && model_err.contains("swiftsim-ltlib"), "{model_err}");
-        assert!(missing_enc.contains("'secret.lib', which is encrypted"), "{missing_enc}");
+        assert!(
+            d.warnings
+                .iter()
+                .any(|w| w.contains("'secret.lib' is vendor-encrypted")),
+            "{:?}",
+            d.warnings
+        );
+        assert!(
+            sub_err.contains("unknown subcircuit 'secretpart'") && !sub_err.contains("encrypted"),
+            "{sub_err}"
+        );
+        assert!(
+            model_err.contains("unknown model 'nosuchdiode'")
+                && model_err.contains("swiftsim-ltlib"),
+            "{model_err}"
+        );
+        assert!(
+            missing_enc.contains("'secret.lib', which is encrypted"),
+            "{missing_enc}"
+        );
     }
 }

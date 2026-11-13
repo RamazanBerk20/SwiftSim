@@ -34,7 +34,10 @@ pub fn junction_at(vj: f64, cj: f64, m: f64, t: f64, tnom: f64) -> (f64, f64) {
     let pbo = (vj - pbfact(tnom)) * TREF / tnom;
     let cj0 = cj / (1.0 + m * (4e-4 * (tnom - TREF) - (vj - pbo) / pbo));
     let vjt = pbfact(t) + t / TREF * pbo;
-    (vjt, cj0 * (1.0 + m * (4e-4 * (t - TREF) - (vjt - pbo) / pbo)))
+    (
+        vjt,
+        cj0 * (1.0 + m * (4e-4 * (t - TREF) - (vjt - pbo) / pbo)),
+    )
 }
 
 pub struct LoadCtx<'a> {
@@ -82,10 +85,9 @@ impl Setup {
         s
     }
     pub fn find_branch(&self, dev: &str) -> Result<usize, String> {
-        self.branches
-            .get(dev)
-            .copied()
-            .ok_or_else(|| format!("'{dev}' is not a voltage source, inductor or other branch device"))
+        self.branches.get(dev).copied().ok_or_else(|| {
+            format!("'{dev}' is not a voltage source, inductor or other branch device")
+        })
     }
 }
 
@@ -101,15 +103,31 @@ pub struct Noise {
 
 impl Noise {
     pub fn psd(&self, f: f64) -> f64 {
-        if self.flicker > 0.0 { self.white + self.flicker / f.powf(self.ef) } else { self.white }
+        if self.flicker > 0.0 {
+            self.white + self.flicker / f.powf(self.ef)
+        } else {
+            self.white
+        }
     }
     /// Thermal noise 4kT·g of conductance `g` at `temp` kelvin.
     fn thermal(a: usize, b: usize, g: f64, temp: f64) -> Noise {
-        Noise { a, b, white: 4.0 * KOQ * Q * temp * g.abs(), flicker: 0.0, ef: 1.0 }
+        Noise {
+            a,
+            b,
+            white: 4.0 * KOQ * Q * temp * g.abs(),
+            flicker: 0.0,
+            ef: 1.0,
+        }
     }
     /// Shot noise 2q|i| plus flicker kf·|i|^af / f.
     fn shot(a: usize, b: usize, i: f64, kf: f64, af: f64) -> Noise {
-        Noise { a, b, white: 2.0 * Q * i.abs(), flicker: kf * i.abs().powf(af), ef: 1.0 }
+        Noise {
+            a,
+            b,
+            white: 2.0 * Q * i.abs(),
+            flicker: kf * i.abs().powf(af),
+            ef: 1.0,
+        }
     }
 }
 
@@ -171,7 +189,17 @@ fn integ(c: &LoadCtx, st: &mut [f64], s: usize, q: f64, cap: f64) -> (f64, f64) 
 
 /// Stamp charge q(v) between a and b; v is V(a)-V(b) at the iterate.
 #[inline]
-fn stamp_q(m: &mut Matrix<f64>, c: &LoadCtx, st: &mut [f64], s: usize, a: usize, b: usize, q: f64, cap: f64, v: f64) {
+fn stamp_q(
+    m: &mut Matrix<f64>,
+    c: &LoadCtx,
+    st: &mut [f64],
+    s: usize,
+    a: usize,
+    b: usize,
+    q: f64,
+    cap: f64,
+    v: f64,
+) {
     let (g, i) = integ(c, st, s, q, cap);
     if !c.dc {
         nl(m, a, b, i, &[(a, b, g, v)]);
@@ -207,7 +235,11 @@ pub fn pnjlim(vnew: f64, vold: f64, vt: f64, vcrit: f64) -> f64 {
     if vnew > vcrit && (vnew - vold).abs() > 2.0 * vt {
         if vold > 0.0 {
             let arg = 1.0 + (vnew - vold) / vt;
-            if arg > 0.0 { vold + vt * arg.ln() } else { vcrit }
+            if arg > 0.0 {
+                vold + vt * arg.ln()
+            } else {
+                vcrit
+            }
         } else {
             vt * (vnew / vt).ln()
         }
@@ -367,7 +399,11 @@ impl Device for Inductor {
         self.s = s.state(2);
     }
     fn bind(&mut self, s: &Setup) -> Result<(), String> {
-        self.coup = self.coupling.iter().map(|(n, m)| Ok((s.find_branch(n)?, *m))).collect::<Result<_, String>>()?;
+        self.coup = self
+            .coupling
+            .iter()
+            .map(|(n, m)| Ok((s.find_branch(n)?, *m)))
+            .collect::<Result<_, String>>()?;
         Ok(())
     }
     fn init_x(&self, x: &mut [f64]) {
@@ -414,11 +450,41 @@ impl Device for Inductor {
 
 #[derive(Clone, Debug)]
 pub enum Wave {
-    Pulse { v1: f64, v2: f64, td: f64, tr: f64, tf: f64, pw: f64, per: f64, ncyc: f64 },
-    Sin { vo: f64, va: f64, freq: f64, td: f64, theta: f64, phi: f64, ncyc: f64 },
-    Exp { v1: f64, v2: f64, td1: f64, tau1: f64, td2: f64, tau2: f64 },
+    Pulse {
+        v1: f64,
+        v2: f64,
+        td: f64,
+        tr: f64,
+        tf: f64,
+        pw: f64,
+        per: f64,
+        ncyc: f64,
+    },
+    Sin {
+        vo: f64,
+        va: f64,
+        freq: f64,
+        td: f64,
+        theta: f64,
+        phi: f64,
+        ncyc: f64,
+    },
+    Exp {
+        v1: f64,
+        v2: f64,
+        td1: f64,
+        tau1: f64,
+        td2: f64,
+        tau2: f64,
+    },
     Pwl(Vec<(f64, f64)>),
-    Sffm { vo: f64, va: f64, fc: f64, mdi: f64, fs: f64 },
+    Sffm {
+        vo: f64,
+        va: f64,
+        fc: f64,
+        mdi: f64,
+        fs: f64,
+    },
 }
 
 /// PULSE rise/fall time used when the netlist gives 0 (explicit edges are kept as written).
@@ -465,14 +531,29 @@ impl Wave {
                 }
                 Wave::Pwl(a.chunks(2).map(|p| (p[0], p[1])).collect())
             }
-            "sffm" => Wave::Sffm { vo: g(0, 0.0), va: g(1, 0.0), fc: g(2, 0.0), mdi: g(3, 0.0), fs: g(4, 0.0) },
+            "sffm" => Wave::Sffm {
+                vo: g(0, 0.0),
+                va: g(1, 0.0),
+                fc: g(2, 0.0),
+                mdi: g(3, 0.0),
+                fs: g(4, 0.0),
+            },
             _ => return Err(format!("unknown source function '{kind}'")),
         })
     }
 
     pub fn at(&self, t: f64) -> f64 {
         match *self {
-            Wave::Pulse { v1, v2, td, tr, tf, pw, per, ncyc } => {
+            Wave::Pulse {
+                v1,
+                v2,
+                td,
+                tr,
+                tf,
+                pw,
+                per,
+                ncyc,
+            } => {
                 if t < td {
                     return v1;
                 }
@@ -494,7 +575,15 @@ impl Wave {
                     v1
                 }
             }
-            Wave::Sin { vo, va, freq, td, theta, phi, ncyc } => {
+            Wave::Sin {
+                vo,
+                va,
+                freq,
+                td,
+                theta,
+                phi,
+                ncyc,
+            } => {
                 let ph = phi.to_radians();
                 if t < td || (ncyc > 0.0 && freq > 0.0 && t > td + ncyc / freq) {
                     return vo + va * ph.sin();
@@ -502,7 +591,14 @@ impl Wave {
                 let tt = t - td;
                 vo + va * (-theta * tt).exp() * (2.0 * std::f64::consts::PI * freq * tt + ph).sin()
             }
-            Wave::Exp { v1, v2, td1, tau1, td2, tau2 } => {
+            Wave::Exp {
+                v1,
+                v2,
+                td1,
+                tau1,
+                td2,
+                tau2,
+            } => {
                 let mut v = v1;
                 if t > td1 {
                     v += (v2 - v1) * (1.0 - (-(t - td1) / tau1).exp());
@@ -522,9 +618,19 @@ impl Wave {
                 }
                 let (t0, v0) = p[i - 1];
                 let (t1, v1) = p[i];
-                if t1 <= t0 { v1 } else { v0 + (v1 - v0) * (t - t0) / (t1 - t0) }
+                if t1 <= t0 {
+                    v1
+                } else {
+                    v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+                }
             }
-            Wave::Sffm { vo, va, fc, mdi, fs } => {
+            Wave::Sffm {
+                vo,
+                va,
+                fc,
+                mdi,
+                fs,
+            } => {
                 let w = 2.0 * std::f64::consts::PI;
                 vo + va * (w * fc * t + mdi * (w * fs * t).sin()).sin()
             }
@@ -533,7 +639,15 @@ impl Wave {
 
     pub fn breakpoints(&self, tstop: f64, out: &mut Vec<f64>) {
         match *self {
-            Wave::Pulse { td, tr, tf, pw, per, ncyc, .. } => {
+            Wave::Pulse {
+                td,
+                tr,
+                tf,
+                pw,
+                per,
+                ncyc,
+                ..
+            } => {
                 let (tr, tf) = (edge(tr), edge(tf));
                 let mut k = 0.0;
                 loop {
@@ -553,7 +667,9 @@ impl Wave {
                 }
             }
             Wave::Sin { td, .. } => out.push(td),
-            Wave::Exp { td1, td2, .. } => out.extend([td1, td2].into_iter().filter(|t| t.is_finite())),
+            Wave::Exp { td1, td2, .. } => {
+                out.extend([td1, td2].into_iter().filter(|t| t.is_finite()))
+            }
             Wave::Pwl(ref p) => out.extend(p.iter().map(|q| q.0)),
             Wave::Sffm { .. } => {}
         }
@@ -635,6 +751,8 @@ pub struct ISource {
     pub dc: f64,
     pub wave: Option<Wave>,
     pub ac: C64,
+    /// State slot holding the value of the last load (the source's current at that time).
+    pub s: usize,
 }
 
 impl ISource {
@@ -651,8 +769,12 @@ impl Device for ISource {
     fn name(&self) -> &str {
         &self.name
     }
-    fn load(&mut self, m: &mut Matrix<f64>, c: &LoadCtx, _st: &mut [f64]) -> bool {
-        m.i(self.a, self.b, self.value(c));
+    fn setup(&mut self, s: &mut Setup) {
+        self.s = s.state(1);
+    }
+    fn load(&mut self, m: &mut Matrix<f64>, c: &LoadCtx, st: &mut [f64]) -> bool {
+        st[self.s] = self.value(c);
+        m.i(self.a, self.b, st[self.s]);
         false
     }
     fn load_ac(&self, m: &mut Matrix<C64>, _x: &[f64], _w: f64, _st: &[f64]) {
@@ -675,8 +797,8 @@ impl Device for ISource {
     fn current_names(&self) -> Vec<String> {
         vec![format!("i({})", self.name)]
     }
-    fn currents(&self, _x: &[f64], _st: &[f64]) -> Vec<f64> {
-        vec![self.wave.as_ref().map_or(self.dc, |_| f64::NAN)]
+    fn currents(&self, _x: &[f64], st: &[f64]) -> Vec<f64> {
+        vec![st[self.s]]
     }
     fn ac_currents(&self, _x: &[f64], _v: &[C64], _w: f64, _st: &[f64]) -> Vec<C64> {
         vec![self.ac]
@@ -769,6 +891,8 @@ pub struct BSource {
     pub bound: Expr,
     pub deps: Vec<usize>,
     pub k: usize,
+    /// State slot holding the time of the last load, for `currents` of an I= source.
+    pub s: usize,
 }
 
 struct XEnv<'a> {
@@ -810,6 +934,8 @@ impl Device for BSource {
     fn setup(&mut self, s: &mut Setup) {
         if self.is_v {
             self.k = s.branch(&self.name);
+        } else {
+            self.s = s.state(1);
         }
     }
     fn bind(&mut self, s: &Setup) -> Result<(), String> {
@@ -818,12 +944,19 @@ impl Device for BSource {
                 if n == "0" || n == "gnd" {
                     return Ok(0);
                 }
-                return s.nodes.get(n).copied().ok_or_else(|| format!("unknown node '{n}' in {}", self.name));
+                return s
+                    .nodes
+                    .get(n)
+                    .copied()
+                    .ok_or_else(|| format!("unknown node '{n}' in {}", self.name));
             }
             if let Some(d) = sig.strip_prefix("i(").and_then(|r| r.strip_suffix(')')) {
                 return s.find_branch(d);
             }
-            Err(format!("signal '{sig}' not supported in behavioral source {}", self.name))
+            Err(format!(
+                "signal '{sig}' not supported in behavioral source {}",
+                self.name
+            ))
         })?;
         let mut deps = vec![];
         collect_x(&self.bound, &mut deps);
@@ -832,10 +965,20 @@ impl Device for BSource {
         deps.dedup();
         self.deps = deps;
         let probe = vec![0.0; s.n + 1];
-        self.bound.eval(&XEnv { x: &probe, t: 0.0, pj: usize::MAX, pv: 0.0 }).map_err(|e| format!("{}: {e}", self.name))?;
+        self.bound
+            .eval(&XEnv {
+                x: &probe,
+                t: 0.0,
+                pj: usize::MAX,
+                pv: 0.0,
+            })
+            .map_err(|e| format!("{}: {e}", self.name))?;
         Ok(())
     }
-    fn load(&mut self, m: &mut Matrix<f64>, c: &LoadCtx, _st: &mut [f64]) -> bool {
+    fn load(&mut self, m: &mut Matrix<f64>, c: &LoadCtx, st: &mut [f64]) -> bool {
+        if !self.is_v {
+            st[self.s] = c.time;
+        }
         let mut g = Vec::with_capacity(self.deps.len());
         let f0 = self.eval(c.x, c.time, &mut g);
         let lin: f64 = self.deps.iter().zip(&g).map(|(&j, &gj)| gj * c.x[j]).sum();
@@ -872,11 +1015,11 @@ impl Device for BSource {
     fn current_names(&self) -> Vec<String> {
         vec![format!("i({})", self.name)]
     }
-    fn currents(&self, x: &[f64], _st: &[f64]) -> Vec<f64> {
+    fn currents(&self, x: &[f64], st: &[f64]) -> Vec<f64> {
         if self.is_v {
             vec![x[self.k]]
         } else {
-            vec![self.eval(x, f64::NAN, &mut vec![])]
+            vec![self.eval(x, st[self.s], &mut vec![])]
         }
     }
     fn ac_currents(&self, x: &[f64], v: &[C64], _w: f64, _st: &[f64]) -> Vec<C64> {
@@ -885,7 +1028,12 @@ impl Device for BSource {
         }
         let mut g = vec![];
         self.eval(x, 0.0, &mut g);
-        vec![self.deps.iter().zip(&g).fold(C64::default(), |s, (&j, &gj)| s + v[j] * C64::from(gj))]
+        vec![
+            self.deps
+                .iter()
+                .zip(&g)
+                .fold(C64::default(), |s, (&j, &gj)| s + v[j] * C64::from(gj)),
+        ]
     }
 }
 
@@ -994,7 +1142,8 @@ impl DiodeModel {
     /// Move IS, VJ and CJO from `tnom` to `t` (kelvin), SPICE3 rules.
     pub fn set_temp(&mut self, t: f64, tnom: f64, eg: f64, xti: f64) {
         self.vt = KOQ * t;
-        self.is *= ((t / tnom - 1.0) * eg / (self.n * self.vt)).exp() * (t / tnom).powf(xti / self.n);
+        self.is *=
+            ((t / tnom - 1.0) * eg / (self.n * self.vt)).exp() * (t / tnom).powf(xti / self.n);
         (self.vj, self.cjo) = junction_at(self.vj, self.cjo, self.m, t, tnom);
     }
 }
@@ -1197,7 +1346,13 @@ impl Bjt {
         } else {
             (0.0, 0.0)
         };
-        let inv = |v: f64| if v.is_finite() && v != 0.0 { 1.0 / v } else { 0.0 };
+        let inv = |v: f64| {
+            if v.is_finite() && v != 0.0 {
+                1.0 / v
+            } else {
+                0.0
+            }
+        };
         let (ova, ovb, oik, oikr) = (inv(md.vaf), inv(md.var), inv(md.ikf), inv(md.ikr));
         let q1 = 1.0 / (1.0 - ova * vbc - ovb * vbe).max(1e-3);
         let (qb, dqbdve, dqbdvc) = if oik == 0.0 && oikr == 0.0 {
@@ -1207,7 +1362,11 @@ impl Bjt {
             let arg = (1.0 + 4.0 * q2).max(1e-12);
             let sq = arg.sqrt();
             let qb = q1 * (1.0 + sq) / 2.0;
-            (qb, q1 * (qb * ovb + oik * gbe / sq), q1 * (qb * ova + oikr * gbc / sq))
+            (
+                qb,
+                q1 * (qb * ovb + oik * gbe / sq),
+                q1 * (qb * ova + oikr * gbc / sq),
+            )
         };
         let ic = (cbe - cbc) / qb - cbc / md.br - cbcn;
         let ib = cbe / md.bf + cben + cbc / md.br + cbcn;
@@ -1257,15 +1416,30 @@ impl Device for Bjt {
         } else {
             let vc = self.vcrit();
             let nvt = self.md.nf * self.md.vt;
-            (pnjlim(rbe, self.vbe_old, nvt, vc), pnjlim(rbc, self.vbc_old, self.md.nr * self.md.vt, vc))
+            (
+                pnjlim(rbe, self.vbe_old, nvt, vc),
+                pnjlim(rbc, self.vbc_old, self.md.nr * self.md.vt, vc),
+            )
         };
         self.vbe_old = vbe;
         self.vbc_old = vbc;
         let o = self.eval(vbe, vbc, c.gmin);
         let (b, cc, e) = (self.b, self.c, self.e);
         let (ube, ubc) = (p * vbe, p * vbc);
-        nl(m, cc, e, p * o.ic, &[(b, e, o.gce, ube), (b, cc, o.gcc, ubc)]);
-        nl(m, b, e, p * o.ib, &[(b, e, o.gpi, ube), (b, cc, o.gmu, ubc)]);
+        nl(
+            m,
+            cc,
+            e,
+            p * o.ic,
+            &[(b, e, o.gce, ube), (b, cc, o.gcc, ubc)],
+        );
+        nl(
+            m,
+            b,
+            e,
+            p * o.ib,
+            &[(b, e, o.gpi, ube), (b, cc, o.gmu, ubc)],
+        );
         stamp_q(m, c, st, self.s, b, e, p * o.qbe, o.cbe, ube);
         stamp_q(m, c, st, self.s + 2, b, cc, p * o.qbc, o.cbc, ubc);
         !c.init && ((vbe - rbe).abs() > 1e-9 || (vbc - rbc).abs() > 1e-9)
@@ -1287,7 +1461,10 @@ impl Device for Bjt {
         out.push(Noise::shot(self.b, self.e, o.ib, self.md.kf, self.md.af));
     }
     fn current_names(&self) -> Vec<String> {
-        ["ic", "ib", "ie"].iter().map(|p| format!("{p}({})", self.name)).collect()
+        ["ic", "ib", "ie"]
+            .iter()
+            .map(|p| format!("{p}({})", self.name))
+            .collect()
     }
     fn currents(&self, x: &[f64], st: &[f64]) -> Vec<f64> {
         let (o, _, _) = self.op_at(x);
@@ -1337,7 +1514,10 @@ impl MosModel {
         let (phit, _) = junction_at(self.phi, 0.0, 0.0, t, tnom);
         let v0 = self.pol * self.vto;
         let sq = |p: f64| p.max(0.1).sqrt(); // same floor as eval()
-        let v = v0 + self.gamma * (sq(phit) - sq(self.phi)) + 0.5 * (phit - self.phi) + self.pol * 0.5 * (egap(tnom) - egap(t));
+        let v = v0
+            + self.gamma * (sq(phit) - sq(self.phi))
+            + 0.5 * (phit - self.phi)
+            + self.pol * 0.5 * (egap(tnom) - egap(t));
         self.vto = self.pol * v;
         self.phi = phit;
     }
@@ -1365,8 +1545,29 @@ pub struct Mos {
 pub fn mos_junction(name: String, a: usize, k: usize, is: f64, t: f64, tnom: f64) -> Diode {
     let vt = KOQ * t;
     let is = is * (egap(tnom) / (KOQ * tnom) - egap(t) / vt).exp();
-    let md = DiodeModel { is, n: 1.0, cjo: 0.0, vj: 1.0, m: 0.5, tt: 0.0, bv: f64::INFINITY, ibv: 1e-3, nbv: 1.0, fc: 0.5, vt, kf: 0.0, af: 1.0 };
-    Diode { name, a, k, md, s: 0, vd_old: 0.0 }
+    let md = DiodeModel {
+        is,
+        n: 1.0,
+        cjo: 0.0,
+        vj: 1.0,
+        m: 0.5,
+        tt: 0.0,
+        bv: f64::INFINITY,
+        ibv: 1e-3,
+        nbv: 1.0,
+        fc: 0.5,
+        vt,
+        kf: 0.0,
+        af: 1.0,
+    };
+    Diode {
+        name,
+        a,
+        k,
+        md,
+        s: 0,
+        vd_old: 0.0,
+    }
 }
 
 impl Mos {
@@ -1398,15 +1599,28 @@ impl Mos {
         let l = 1.0 + md.lambda * vds;
         let b = self.beta;
         let (ids, gm, gds) = if vds < vgst {
-            (b * (vgst - vds / 2.0) * vds * l, b * vds * l, b * ((vgst - vds) * l + md.lambda * (vgst - vds / 2.0) * vds))
+            (
+                b * (vgst - vds / 2.0) * vds * l,
+                b * vds * l,
+                b * ((vgst - vds) * l + md.lambda * (vgst - vds / 2.0) * vds),
+            )
         } else {
-            (b / 2.0 * vgst * vgst * l, b * vgst * l, b / 2.0 * vgst * vgst * md.lambda)
+            (
+                b / 2.0 * vgst * vgst * l,
+                b * vgst * l,
+                b / 2.0 * vgst * vgst * md.lambda,
+            )
         };
         let gm = gm * dvgst;
         (ids, gm, gds, gm * md.gamma * dsarg)
     }
     /// Returns ((drain', source') nodes, normalized voltages, model outputs).
-    fn bias(&self, vgs: f64, vds: f64, vbs: f64) -> ((usize, usize), (f64, f64, f64), (f64, f64, f64, f64)) {
+    fn bias(
+        &self,
+        vgs: f64,
+        vds: f64,
+        vbs: f64,
+    ) -> ((usize, usize), (f64, f64, f64), (f64, f64, f64, f64)) {
         if vds >= 0.0 {
             ((self.d, self.s), (vgs, vds, vbs), self.eval(vgs, vds, vbs))
         } else {
@@ -1416,7 +1630,11 @@ impl Mos {
     }
     fn raw(&self, x: &[f64]) -> (f64, f64, f64) {
         let p = self.md.pol;
-        (p * (x[self.g] - x[self.s]), p * (x[self.d] - x[self.s]), p * (x[self.b] - x[self.s]))
+        (
+            p * (x[self.g] - x[self.s]),
+            p * (x[self.d] - x[self.s]),
+            p * (x[self.b] - x[self.s]),
+        )
     }
 }
 
@@ -1453,7 +1671,17 @@ impl Device for Mos {
         self.vgs_old = vgs;
         self.vds_old = vds;
         let ((dn, sn), (egs, eds, ebs), (ids, gm, gds, gmbs)) = self.bias(vgs, vds, vbs);
-        nl(m, dn, sn, p * ids, &[(self.g, sn, gm, p * egs), (dn, sn, gds, p * eds), (self.b, sn, gmbs, p * ebs)]);
+        nl(
+            m,
+            dn,
+            sn,
+            p * ids,
+            &[
+                (self.g, sn, gm, p * egs),
+                (dn, sn, gds, p * eds),
+                (self.b, sn, gmbs, p * ebs),
+            ],
+        );
         m.g(self.d, self.s, c.gmin);
         let (d, g, s, b) = (self.d, self.g, self.s, self.b);
         let md = &self.md;
@@ -1502,13 +1730,25 @@ impl Device for Mos {
         out.push(n);
     }
     fn current_names(&self) -> Vec<String> {
-        ["id", "ig", "is"].iter().map(|p| format!("{p}({})", self.name)).collect()
+        ["id", "ig", "is"]
+            .iter()
+            .map(|p| format!("{p}({})", self.name))
+            .collect()
     }
     fn currents(&self, x: &[f64], st: &[f64]) -> Vec<f64> {
         let (vgs, vds, vbs) = self.raw(x);
         let ((dn, _), _, (ids, ..)) = self.bias(vgs, vds, vbs);
-        let ich = if dn == self.d { self.md.pol * ids } else { -self.md.pol * ids };
-        let (igs, igd, mut ibd, mut ibs) = (st[self.st + 1], st[self.st + 3], st[self.st + 5], st[self.st + 7]);
+        let ich = if dn == self.d {
+            self.md.pol * ids
+        } else {
+            -self.md.pol * ids
+        };
+        let (igs, igd, mut ibd, mut ibs) = (
+            st[self.st + 1],
+            st[self.st + 3],
+            st[self.st + 5],
+            st[self.st + 7],
+        );
         // bulk junction currents, bulk -> drain / source
         if let [jd, js] = &self.bulk[..] {
             ibd += self.md.pol * jd.currents(x, st)[0];
@@ -1522,7 +1762,9 @@ impl Device for Mos {
     fn ac_currents(&self, x: &[f64], v: &[C64], w: f64, st: &[f64]) -> Vec<C64> {
         let (vgs, vds, vbs) = self.raw(x);
         let ((dn, sn), _, (_, gm, gds, gmbs)) = self.bias(vgs, vds, vbs);
-        let mut ich = (v[self.g] - v[sn]) * C64::from(gm) + (v[dn] - v[sn]) * C64::from(gds) + (v[self.b] - v[sn]) * C64::from(gmbs);
+        let mut ich = (v[self.g] - v[sn]) * C64::from(gm)
+            + (v[dn] - v[sn]) * C64::from(gds)
+            + (v[self.b] - v[sn]) * C64::from(gmbs);
         if dn != self.d {
             ich = -ich;
         }
@@ -1554,7 +1796,11 @@ impl Jfet {
     /// Terminal currents [id, ig, is] from channel [id, ig, is] and the junction currents (anode → cathode).
     fn terminals<T: crate::solver::Scalar>(&self, ch: Vec<T>, gs: T, gd: T) -> Vec<T> {
         // n-channel junctions point gate → channel, p-channel channel → gate
-        let (gs, gd) = if self.ch.md.pol > 0.0 { (gs, gd) } else { (-gs, -gd) };
+        let (gs, gd) = if self.ch.md.pol > 0.0 {
+            (gs, gd)
+        } else {
+            (-gs, -gd)
+        };
         vec![ch[0] - gd, gs + gd, ch[2] - gs]
     }
 }
@@ -1586,12 +1832,23 @@ impl Device for Jfet {
         self.ch.noise(x, st, temp, out);
     }
     fn current_names(&self) -> Vec<String> {
-        ["id", "ig", "is"].iter().map(|p| format!("{p}({})", self.name)).collect()
+        ["id", "ig", "is"]
+            .iter()
+            .map(|p| format!("{p}({})", self.name))
+            .collect()
     }
     fn currents(&self, x: &[f64], st: &[f64]) -> Vec<f64> {
-        self.terminals(self.ch.currents(x, st), self.gs.currents(x, st)[0], self.gd.currents(x, st)[0])
+        self.terminals(
+            self.ch.currents(x, st),
+            self.gs.currents(x, st)[0],
+            self.gd.currents(x, st)[0],
+        )
     }
     fn ac_currents(&self, x: &[f64], v: &[C64], w: f64, st: &[f64]) -> Vec<C64> {
-        self.terminals(self.ch.ac_currents(x, v, w, st), self.gs.ac_currents(x, v, w, st)[0], self.gd.ac_currents(x, v, w, st)[0])
+        self.terminals(
+            self.ch.ac_currents(x, v, w, st),
+            self.gs.ac_currents(x, v, w, st)[0],
+            self.gd.ac_currents(x, v, w, st)[0],
+        )
     }
 }

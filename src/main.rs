@@ -9,7 +9,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     // Release builds use the GUI subsystem (no console), so CLI modes borrow the parent shell's console to print.
     #[cfg(windows)]
-    if args.iter().any(|a| matches!(a.as_str(), "-b" | "--batch" | "-h" | "--help")) {
+    if args
+        .iter()
+        .any(|a| matches!(a.as_str(), "-b" | "--batch" | "-h" | "--help"))
+    {
         #[link(name = "kernel32")]
         unsafe extern "system" {
             fn AttachConsole(pid: u32) -> i32;
@@ -19,17 +22,35 @@ fn main() {
     }
     if let Some(i) = args.iter().position(|a| a == "-b" || a == "--batch") {
         let Some(file) = args.get(i + 1) else {
-            eprintln!("usage: swiftsim -b <file> [-o out.csv] [--netlist]");
+            eprintln!("usage: swiftsim -b <file> [-o out.csv] [--raw out.raw] [--netlist]");
             std::process::exit(2);
         };
-        let out = args.iter().position(|a| a == "-o").and_then(|j| args.get(j + 1));
-        std::process::exit(batch(file, out.map(|s| s.as_str()), args.iter().any(|a| a == "--netlist")));
+        let opt = |name: &str| {
+            args.iter()
+                .position(|a| a == name)
+                .and_then(|j| args.get(j + 1))
+                .cloned()
+        };
+        let (file, out, raw, show) = (
+            file.clone(),
+            opt("-o"),
+            opt("--raw"),
+            args.iter().any(|a| a == "--netlist"),
+        );
+        // on the engine's stack size (Windows gives the main thread only 1 MiB)
+        let run = std::thread::Builder::new()
+            .stack_size(swiftsim::sim::STACK)
+            .spawn(move || batch(&file, out.as_deref(), raw.as_deref(), show));
+        std::process::exit(run.ok().and_then(|t| t.join().ok()).unwrap_or(101));
     }
     if args.iter().any(|a| a == "--mcp") {
         return mcp::serve();
     }
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        println!("SwiftSim {}\n\nusage:\n  swiftsim [file.sws|file.cir]      open the GUI\n  swiftsim -b <file> [-o out.csv]    batch simulation of a .cir/.net, .sws or .asc file\n      --netlist                      also print the netlist that is simulated\n  swiftsim --mcp                     MCP server on stdio, for coding agents", gui::update::VERSION);
+        println!(
+            "SwiftSim {}\n\nusage:\n  swiftsim [file.sws|file.cir]      open the GUI\n  swiftsim -b <file> [-o out.csv]    batch simulation of a .cir/.net, .sws or .asc file\n      --raw out.raw                  also write the results as an LTspice .raw file\n      --netlist                      also print the netlist that is simulated\n  SWIFTSIM_JOBS=n                    at most n threads for .step points (1 = one at a time)\n  swiftsim --mcp                     MCP server on stdio, for coding agents",
+            gui::update::VERSION
+        );
         return;
     }
     if let Err(e) = gui::run(args.get(1).cloned()) {
@@ -43,20 +64,31 @@ fn read_circuit(file: &str) -> Result<(String, Vec<String>), String> {
     let lower = file.to_ascii_lowercase();
     let bytes = std::fs::read(file).map_err(|e| format!("{file}: {e}"))?;
     if lower.ends_with(".sws") {
-        return gui::sws_netlist(&swiftsim::netlist::decode(&bytes)).map_err(|e| format!("{file}: {e}"));
+        return gui::sws_netlist(&swiftsim::netlist::decode(&bytes))
+            .map_err(|e| format!("{file}: {e}"));
     }
     if lower.ends_with(".asc") {
-        let (s, skipped) = gui::asc::import(&swiftsim::netlist::decode(&bytes), Path::new(file).parent());
+        let (s, skipped) =
+            gui::asc::import(&swiftsim::netlist::decode(&bytes), Path::new(file).parent());
         let mut warnings = s.name_conflicts();
         if !skipped.is_empty() {
-            warnings.push(format!("warning: unsupported LTspice symbols left out (their nets are open): {}", skipped.join(", ")));
+            warnings.push(format!(
+                "warning: unsupported LTspice symbols left out (their nets are open): {}",
+                skipped.join(", ")
+            ));
         }
         return Ok((s.netlist().text, warnings));
     }
     Ok((swiftsim::netlist::decode(&bytes), vec![]))
 }
 
-fn batch(file: &str, out: Option<&str>, show_netlist: bool) -> i32 {
+/// The results as an LTspice `.raw` file, titled with the netlist's first line.
+fn write_raw(path: &str, plots: &[swiftsim::Plot], netlist: &str) -> Result<(), String> {
+    let bytes = swiftsim::to_raw(plots, netlist.lines().next().unwrap_or(""))?;
+    std::fs::write(path, bytes).map_err(|e| format!("{path}: {e}"))
+}
+
+fn batch(file: &str, out: Option<&str>, raw: Option<&str>, show_netlist: bool) -> i32 {
     let (text, warnings) = match read_circuit(file) {
         Ok(c) => c,
         Err(e) => {
@@ -79,6 +111,13 @@ fn batch(file: &str, out: Option<&str>, show_netlist: bool) -> i32 {
             if let Some(o) = out {
                 if let Err(e) = std::fs::write(o, swiftsim::to_csv(&r.plots)) {
                     eprintln!("{o}: {e}");
+                    return 1;
+                }
+                println!("wrote {o}");
+            }
+            if let Some(o) = raw {
+                if let Err(e) = write_raw(o, &r.plots, &text) {
+                    eprintln!("{e}");
                     return 1;
                 }
                 println!("wrote {o}");

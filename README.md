@@ -54,7 +54,13 @@ cargo build --release
 ./target/release/swiftsim -b my.cir -o out.csv   # batch run, log + CSV export
 ./target/release/swiftsim -b my.asc              # batch-run an LTspice schematic
 ./target/release/swiftsim -b my.sws --netlist    # batch-run a saved schematic, print its netlist
+./target/release/swiftsim -b my.cir --raw out.raw  # also write an LTspice-compatible .raw file
 ```
+
+`.step` points run in parallel, one thread per core but one; `SWIFTSIM_JOBS=n` caps the threads
+(`SWIFTSIM_JOBS=1` runs them one at a time). Results are identical either way and come in step order.
+Monte Carlo functions (`rand`, `mc`, `flat`, `gauss`) draw a new seed each run; each step point gets
+its own stream from it, so `SWIFTSIM_SEED=<number>` repeats a run exactly, on any number of threads.
 
 On Windows the same commands produce `swiftsim.exe` (no console window in release builds).
 
@@ -77,7 +83,7 @@ On Windows the same commands produce `swiftsim.exe` (no console window in releas
   `temp` is usable in expressions. SPICE3 scaling of diode/BJT saturation currents (`XTI`, `EG`),
   junction potentials and capacitances, BJT beta (`XTB`), level-1 MOSFET VTO/KP, thermal voltage,
   resistor `tc1=`/`tc2=` (or `tc=a,b`)
-- `.step` (param / source / element / temp; lin, dec, oct, list; nested), `.meas`
+- `.step` (param / source / element / temp; lin, dec, oct, list; nested; points run in parallel), `.meas`
   (AVG, MAX, MIN, PP, RMS, INTEG, FIND…AT, FIND…WHEN, WHEN, TRIG/TARG, PARAM),
   `.param` with expressions, `.func` user functions (global or per `.subckt`), `.ic`,
   `.options`, `.model`, `.subckt` with `params:`,
@@ -107,7 +113,14 @@ On Windows the same commands produce `swiftsim.exe` (no console window in releas
   undo/redo, zoom/pan/fit, junction dots, unconnected-pin markers
 - Properties panel: values, model picker (built-in + your `.model`s), structured
   source editor (DC / Pulse / Sine / Exp / PWL + AC), simulation-command form
-- Simulation runs in the background with progress and Stop
+- Simulation runs in the background with progress (`.step` runs count their points) and Stop
+- Parameters panel: every numeric top-level `.param` of the schematic gets a slider (a decade
+  either side, log scale; the range is editable) and a value field. Moving one re-runs the last
+  simulation and redraws the plot; a run still going is stopped and replaced by the newest value.
+  The schematic changes only with *Apply to schematic* (one undoable edit); *Reset* goes back
+  to the schematic's values. F6 focuses the first slider, the arrow keys move it
+- File ▸ Export results as LTspice .raw: binary `.raw` (transient, AC, DC sweep, noise,
+  operating point, stepped runs) for LTspice and other `.raw` readers
 - Probe: click a wire → voltage, click a part → current (after `.noise`: its noise
   contribution); labeled nets auto-plot
 - Waveforms: separate V and A panes on a shared axis, Bode plots (dB + phase, log
@@ -146,6 +159,7 @@ On Windows the same commands produce `swiftsim.exe` (no console window in releas
 | T or `.` | SPICE directive | Del | delete |
 | P | probe | Space | zoom to fit |
 | Esc | cancel / select tool | F5 | run |
+| F6 | Parameters panel (arrows move a slider) | | |
 
 Pan with middle or right drag, zoom with the wheel.
 
@@ -203,9 +217,24 @@ it with the full path to this copy, which is what you want on Windows or with th
 
 | Tool | What it does |
 |---|---|
-| `simulate` | Runs netlist text or a `.sws`/`.asc`/`.cir` file; returns the log, `.meas` results, signal names and sampled `traces` (`V(out)`, `I(R1)`, …; AC as dB and degrees); `csv` also writes every point to a file |
+| `simulate` | Runs netlist text or a `.sws`/`.asc`/`.cir` file; returns the log, `.meas` results, signal names and sampled `traces` (`V(out)`, `I(R1)`, …; AC as dB and degrees); `csv` also writes every point to a file, `raw` an LTspice `.raw` file |
 | `schematic_netlist` | The SPICE netlist of a `.sws` or `.asc` schematic |
 | `open_in_gui` | Opens a circuit file in a new SwiftSim window |
+| `gui_status` | Lists the open windows (`pid`, document, simulation state, live parameters, whether an agent drives it); can wait until a run is `finished` or `failed` |
+| `gui_netlist` | The netlist of a window's document, its path and unsaved state, and its Parameters values |
+| `gui_run` | Runs the window's simulation (with its Parameters values) and waits for it to end; needs the `generation` of the document you read |
+| `gui_results` | The window's results, in the same shape as `simulate` |
+| `gui_set_params` | Sets Parameters values, like the sliders: the last simulation re-runs; the schematic is not changed; needs `generation` |
+| `gui_last_error` | The window's last simulation error and the error lines of its Log |
+
+The `gui_*` tools work on the window the user is looking at (`pid` picks one when several are open).
+Requests reach it through files in a folder only you can open: `$XDG_RUNTIME_DIR/swiftsim` (mode 0700,
+files 0600; `ipc` in the config folder without `XDG_RUNTIME_DIR`), or `%APPDATA%\SwiftSim\ipc` on
+Windows. Nothing listens on a network port. While an agent drives it, the window says so in its
+toolbar. An agent never saves, opens or closes a file or touches unsaved edits, and its requests are
+refused while a dialog is open or the mouse button is held down. A request the window can't take
+before its deadline (15 s) is dropped without being carried out, and `gui_run`/`gui_set_params` are
+refused when the window has another document than the `generation` the agent read.
 
 ## Not yet supported (compared with LTSpice)
 
@@ -230,7 +259,7 @@ Being explicit, since the goal is LTSpice parity:
   (subcircuits show as a box), hierarchical schematics
 - VDMOS gate-drain capacitance is constant (LTSpice's is voltage-dependent); level-1
   MOSFETs have constant (non-Meyer) capacitances
-- Waveform-file export in `.raw` format
+- `.raw` export follows the published file layout but has not been opened in LTspice itself yet
 
 ## Layout
 

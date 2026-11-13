@@ -2,7 +2,7 @@
 //! connectivity and netlist generation.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub type P = [i32; 2];
 
@@ -88,7 +88,15 @@ impl Kind {
     pub fn category(self) -> &'static str {
         match self {
             Kind::Resistor | Kind::Capacitor | Kind::Inductor => "Passive",
-            Kind::Diode | Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 | Kind::Njf | Kind::Pjf => "Semiconductor",
+            Kind::Diode
+            | Kind::Npn
+            | Kind::Pnp
+            | Kind::Nmos
+            | Kind::Pmos
+            | Kind::Nmos4
+            | Kind::Pmos4
+            | Kind::Njf
+            | Kind::Pjf => "Semiconductor",
             Kind::Voltage | Kind::Current | Kind::Vcvs | Kind::Vccs | Kind::Behavioral => "Sources",
             Kind::OpAmp | Kind::Switch | Kind::Subckt => "Blocks",
             Kind::Ground | Kind::Label => "Wiring",
@@ -214,7 +222,12 @@ pub struct Schematic {
 
 impl Default for Schematic {
     fn default() -> Self {
-        Schematic { format: Schematic::FORMAT, comps: vec![], wires: vec![], texts: vec![] }
+        Schematic {
+            format: Schematic::FORMAT,
+            comps: vec![],
+            wires: vec![],
+            texts: vec![],
+        }
     }
 }
 
@@ -229,8 +242,16 @@ pub enum Prim {
 /// Pins in local grid units, in netlist order.
 pub fn pins(k: Kind) -> &'static [P] {
     match k {
-        Kind::Resistor | Kind::Capacitor | Kind::Inductor | Kind::Diode | Kind::Voltage | Kind::Current | Kind::Behavioral => &[[0, -2], [0, 2]],
-        Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos | Kind::Njf | Kind::Pjf => &[[1, -2], [-2, 0], [1, 2]],
+        Kind::Resistor
+        | Kind::Capacitor
+        | Kind::Inductor
+        | Kind::Diode
+        | Kind::Voltage
+        | Kind::Current
+        | Kind::Behavioral => &[[0, -2], [0, 2]],
+        Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos | Kind::Njf | Kind::Pjf => {
+            &[[1, -2], [-2, 0], [1, 2]]
+        }
         Kind::Nmos4 | Kind::Pmos4 => &[[1, -2], [-2, 0], [1, 2], [1, 0]],
         // inp (+) on top, inn (−) below (format 1; format 0 had them the other way round)
         Kind::OpAmp => &[[-2, -1], [-2, 1], [2, 0]],
@@ -241,20 +262,30 @@ pub fn pins(k: Kind) -> &'static [P] {
 }
 
 fn arc(cx: f32, cy: f32, r: f32, a0: f32, a1: f32) -> Vec<[f32; 2]> {
-    (0..=12).map(|i| {
-        let a = a0 + (a1 - a0) * i as f32 / 12.0;
-        [cx + r * a.cos(), cy + r * a.sin()]
-    })
-    .collect()
+    (0..=12)
+        .map(|i| {
+            let a = a0 + (a1 - a0) * i as f32 / 12.0;
+            [cx + r * a.cos(), cy + r * a.sin()]
+        })
+        .collect()
 }
 
 pub fn symbol(k: Kind) -> Vec<Prim> {
     use Prim::*;
     let pi = std::f32::consts::PI;
     match k {
-        Kind::Resistor => vec![
-            Line(vec![[0., -2.], [0., -1.2], [0.4, -1.0], [-0.4, -0.6], [0.4, -0.2], [-0.4, 0.2], [0.4, 0.6], [-0.4, 1.0], [0., 1.2], [0., 2.]]),
-        ],
+        Kind::Resistor => vec![Line(vec![
+            [0., -2.],
+            [0., -1.2],
+            [0.4, -1.0],
+            [-0.4, -0.6],
+            [0.4, -0.2],
+            [-0.4, 0.2],
+            [0.4, 0.6],
+            [-0.4, 1.0],
+            [0., 1.2],
+            [0., 2.],
+        ])],
         Kind::Capacitor => vec![
             Line(vec![[0., -2.], [0., -0.25]]),
             Line(vec![[-0.8, -0.25], [0.8, -0.25]]),
@@ -262,7 +293,10 @@ pub fn symbol(k: Kind) -> Vec<Prim> {
             Line(vec![[0., 0.25], [0., 2.]]),
         ],
         Kind::Inductor => {
-            let mut v = vec![Line(vec![[0., -2.], [0., -1.4]]), Line(vec![[0., 1.4], [0., 2.]])];
+            let mut v = vec![
+                Line(vec![[0., -2.], [0., -1.4]]),
+                Line(vec![[0., 1.4], [0., 2.]]),
+            ];
             for i in 0..4 {
                 let cy = -1.05 + 0.7 * i as f32;
                 v.push(Line(arc(0.0, cy, 0.35, -pi / 2.0, pi / 2.0)));
@@ -316,7 +350,11 @@ pub fn symbol(k: Kind) -> Vec<Prim> {
                 Line(vec![[-0.5, -0.7], [1., -0.7], [1., -2.]]),
                 Line(vec![[-0.5, 0.7], [1., 0.7], [1., 2.]]),
                 // 3-pin parts tie the body to the source; 4-pin parts bring it out
-                Line(if four { vec![[-0.5, 0.], [1., 0.]] } else { vec![[-0.5, 0.], [1., 0.], [1., 0.7]] }),
+                Line(if four {
+                    vec![[-0.5, 0.], [1., 0.]]
+                } else {
+                    vec![[-0.5, 0.], [1., 0.], [1., 0.7]]
+                }),
             ];
             v.push(if matches!(k, Kind::Nmos | Kind::Nmos4) {
                 Poly(vec![[-0.45, 0.], [-0.05, -0.22], [-0.05, 0.22]])
@@ -330,7 +368,11 @@ pub fn symbol(k: Kind) -> Vec<Prim> {
             Line(vec![[-0.5, -1.0], [-0.5, 1.0]]),
             Line(vec![[-0.5, -0.7], [1., -0.7], [1., -2.]]),
             Line(vec![[-0.5, 0.7], [1., 0.7], [1., 2.]]),
-            if k == Kind::Njf { Poly(vec![[-0.55, 0.], [-1.0, -0.22], [-1.0, 0.22]]) } else { Poly(vec![[-1.0, 0.], [-0.55, -0.22], [-0.55, 0.22]]) },
+            if k == Kind::Njf {
+                Poly(vec![[-0.55, 0.], [-1.0, -0.22], [-1.0, 0.22]])
+            } else {
+                Poly(vec![[-1.0, 0.], [-0.55, -0.22], [-0.55, 0.22]])
+            },
         ],
         // outline, not filled: the + (top, non-inverting) and − (bottom) marks sit inside it
         Kind::OpAmp => vec![
@@ -389,9 +431,18 @@ pub fn symbol(k: Kind) -> Vec<Prim> {
 /// Local bounding box (min, max) of a symbol.
 pub fn bbox(k: Kind) -> ([f32; 2], [f32; 2]) {
     match k {
-        Kind::Resistor | Kind::Inductor | Kind::Diode | Kind::Capacitor => ([-0.8, -2.0], [0.8, 2.0]),
+        Kind::Resistor | Kind::Inductor | Kind::Diode | Kind::Capacitor => {
+            ([-0.8, -2.0], [0.8, 2.0])
+        }
         Kind::Voltage | Kind::Current | Kind::Behavioral => ([-1.0, -2.0], [1.0, 2.0]),
-        Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 | Kind::Njf | Kind::Pjf => ([-2.0, -2.0], [1.6, 2.0]),
+        Kind::Npn
+        | Kind::Pnp
+        | Kind::Nmos
+        | Kind::Pmos
+        | Kind::Nmos4
+        | Kind::Pmos4
+        | Kind::Njf
+        | Kind::Pjf => ([-2.0, -2.0], [1.6, 2.0]),
         Kind::OpAmp => ([-2.0, -1.8], [2.0, 1.8]),
         Kind::Vcvs | Kind::Vccs | Kind::Switch => ([-2.0, -2.0], [1.0, 2.0]),
         Kind::Ground => ([-0.8, 0.0], [0.8, 1.3]),
@@ -413,7 +464,11 @@ impl Component {
         [x + self.pos[0] as f32, y + self.pos[1] as f32]
     }
     pub fn local_pins(&self) -> &[P] {
-        if self.kind == Kind::Subckt { &self.pins } else { pins(self.kind) }
+        if self.kind == Kind::Subckt {
+            &self.pins
+        } else {
+            pins(self.kind)
+        }
     }
     /// A subcircuit is drawn as the box through its pins (at least 2 units each way).
     pub fn local_bbox(&self) -> ([f32; 2], [f32; 2]) {
@@ -451,9 +506,20 @@ impl Component {
     }
     pub fn world_bbox(&self) -> ([f32; 2], [f32; 2]) {
         let (a, b) = self.local_bbox();
-        let c = [self.tf(a), self.tf(b), self.tf([a[0], b[1]]), self.tf([b[0], a[1]])];
-        let min = [c.iter().map(|p| p[0]).fold(f32::MAX, f32::min), c.iter().map(|p| p[1]).fold(f32::MAX, f32::min)];
-        let max = [c.iter().map(|p| p[0]).fold(f32::MIN, f32::max), c.iter().map(|p| p[1]).fold(f32::MIN, f32::max)];
+        let c = [
+            self.tf(a),
+            self.tf(b),
+            self.tf([a[0], b[1]]),
+            self.tf([b[0], a[1]]),
+        ];
+        let min = [
+            c.iter().map(|p| p[0]).fold(f32::MAX, f32::min),
+            c.iter().map(|p| p[1]).fold(f32::MAX, f32::min),
+        ];
+        let max = [
+            c.iter().map(|p| p[0]).fold(f32::MIN, f32::max),
+            c.iter().map(|p| p[1]).fold(f32::MIN, f32::max),
+        ];
         (min, max)
     }
     /// Signal to probe when the component body is clicked.
@@ -462,7 +528,9 @@ impl Component {
         Some(match self.kind {
             Kind::Ground | Kind::Label | Kind::OpAmp | Kind::Subckt => return None,
             Kind::Npn | Kind::Pnp => format!("Ic({n})"),
-            Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 | Kind::Njf | Kind::Pjf => format!("Id({n})"),
+            Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 | Kind::Njf | Kind::Pjf => {
+                format!("Id({n})")
+            }
             _ => format!("I({n})"),
         })
     }
@@ -471,7 +539,11 @@ impl Component {
         if self.kind == Kind::OpAmp {
             return format!("X{}", self.name);
         }
-        if p.is_empty() || self.name.to_ascii_uppercase().starts_with(p) { self.name.clone() } else { format!("{p}{}", self.name) }
+        if p.is_empty() || self.name.to_ascii_uppercase().starts_with(p) {
+            self.name.clone()
+        } else {
+            format!("{p}{}", self.name)
+        }
     }
 }
 
@@ -521,6 +593,48 @@ pub struct Netlist {
     pub nets: HashMap<P, String>,
     /// Number of connections at each point (for junction dots).
     pub degree: HashMap<P, usize>,
+    /// Pin positions of parts (not grounds or labels), for open-pin marks.
+    pub pins: HashSet<P>,
+}
+
+/// Points by column and by row, so a wire is tested only against the points on its line.
+struct Lines<'a> {
+    pts: &'a [P],
+    by_x: HashMap<i32, Vec<usize>>,
+    by_y: HashMap<i32, Vec<usize>>,
+}
+
+impl<'a> Lines<'a> {
+    fn new(pts: &'a [P]) -> Lines<'a> {
+        let (mut by_x, mut by_y) = (
+            HashMap::<i32, Vec<usize>>::new(),
+            HashMap::<i32, Vec<usize>>::new(),
+        );
+        for (i, p) in pts.iter().enumerate() {
+            by_x.entry(p[0]).or_default().push(i);
+            by_y.entry(p[1]).or_default().push(i);
+        }
+        Lines { pts, by_x, by_y }
+    }
+
+    /// Indices of the points on wire `w` (diagonal wires fall back to testing every point).
+    fn on(&self, w: &Wire) -> Vec<usize> {
+        let cand: Vec<usize> = if w.a[0] == w.b[0] {
+            self.by_x.get(&w.a[0]).cloned().unwrap_or_default()
+        } else if w.a[1] == w.b[1] {
+            self.by_y.get(&w.a[1]).cloned().unwrap_or_default()
+        } else {
+            (0..self.pts.len()).collect()
+        };
+        cand.into_iter()
+            .filter(|&i| on_segment(self.pts[i], w))
+            .collect()
+    }
+}
+
+/// A net label as a SPICE node name: whitespace would split the card.
+fn node_name(label: &str) -> String {
+    label.split_whitespace().collect::<Vec<_>>().join("_")
 }
 
 impl Schematic {
@@ -543,12 +657,11 @@ impl Schematic {
             add(w.b, &mut pts);
         }
         let mut d = Dsu((0..pts.len()).collect());
+        let lines = Lines::new(&pts);
         for w in &self.wires {
             let ia = idx[&w.a];
-            for (i, p) in pts.iter().enumerate() {
-                if on_segment(*p, w) {
-                    d.union(ia, i);
-                }
+            for i in lines.on(w) {
+                d.union(ia, i);
             }
         }
         // labels with the same name are one net; all grounds are one net
@@ -556,10 +669,15 @@ impl Schematic {
         for c in &self.comps {
             let key = match c.kind {
                 Kind::Ground => "0".to_string(),
-                Kind::Label if !c.value.trim().is_empty() => swiftsim::expr::fold(c.value.trim()),
+                Kind::Label if !c.value.trim().is_empty() => {
+                    swiftsim::expr::fold(&node_name(&c.value))
+                }
                 _ => continue,
             };
-            let i = idx[&c.pin_pos()[0]];
+            let Some(p) = c.pin_pos().first().copied() else {
+                continue;
+            };
+            let i = idx[&p];
             match by_name.get(&key) {
                 Some(&j) => d.union(i, j),
                 None => {
@@ -571,18 +689,46 @@ impl Schematic {
         (pts, roots, idx)
     }
 
-    /// Warnings for net labels that are different words but one net, such as `kır` and `kir`.
+    /// Why this schematic can't be loaded, if it can't: a subcircuit part needs pins.
+    pub fn check(&self) -> Result<(), String> {
+        match self
+            .comps
+            .iter()
+            .find(|c| c.kind == Kind::Subckt && c.pins.is_empty())
+        {
+            Some(c) => Err(format!(
+                "part {} (subcircuit {}) has no pins",
+                c.spice_name(),
+                c.value.trim()
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Warnings for net labels that are different words but one net, such as `kır` and `kir`,
+    /// and for labels with spaces (netlisted with `_`).
     pub fn name_conflicts(&self) -> Vec<String> {
         let mut first: HashMap<String, &str> = HashMap::new();
         let mut out = vec![];
         for c in self.comps.iter().filter(|c| c.kind == Kind::Label) {
             let v = c.value.trim();
+            if v.contains(char::is_whitespace) {
+                let msg = format!(
+                    "warning: net label '{v}' contains spaces; it is the net '{}'",
+                    node_name(v)
+                );
+                if !out.contains(&msg) {
+                    out.push(msg);
+                }
+            }
             match first.get(&swiftsim::expr::fold(v)) {
                 None => {
                     first.insert(swiftsim::expr::fold(v), v);
                 }
                 Some(f) if swiftsim::expr::distinct_spellings(f, v) => {
-                    let msg = format!("warning: net labels '{f}' and '{v}' are one net (names ignore case, and ı and İ count as i)");
+                    let msg = format!(
+                        "warning: net labels '{f}' and '{v}' are one net (names ignore case, and ı and İ count as i)"
+                    );
                     if !out.contains(&msg) {
                         out.push(msg);
                     }
@@ -597,13 +743,18 @@ impl Schematic {
         let (pts, roots, idx) = self.connectivity();
         let mut names: HashMap<usize, String> = HashMap::new();
         for c in &self.comps {
-            let r = roots[idx[&c.pin_pos()[0]]];
+            // only grounds and labels name nets (both have one pin)
+            let root = || c.pin_pos().first().map(|p| roots[idx[p]]);
             match c.kind {
                 Kind::Ground => {
-                    names.insert(r, "0".into());
+                    if let Some(r) = root() {
+                        names.insert(r, "0".into());
+                    }
                 }
                 Kind::Label if !c.value.trim().is_empty() => {
-                    names.entry(r).or_insert_with(|| c.value.trim().to_string());
+                    if let Some(r) = root() {
+                        names.entry(r).or_insert_with(|| node_name(&c.value));
+                    }
                 }
                 _ => {}
             }
@@ -615,18 +766,26 @@ impl Schematic {
                 format!("N{k:03}")
             });
         }
-        let nets: HashMap<P, String> = pts.iter().enumerate().map(|(i, p)| (*p, names[&roots[i]].clone())).collect();
+        let nets: HashMap<P, String> = pts
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (*p, names[&roots[i]].clone()))
+            .collect();
         let mut degree: HashMap<P, usize> = HashMap::new();
+        let mut pins = HashSet::new();
         for c in &self.comps {
             for p in c.pin_pos() {
                 *degree.entry(p).or_default() += 1;
+                if !matches!(c.kind, Kind::Ground | Kind::Label) {
+                    pins.insert(p);
+                }
             }
         }
+        let lines = Lines::new(&pts);
         for w in &self.wires {
-            for p in pts.iter() {
-                if on_segment(*p, w) {
-                    *degree.entry(*p).or_default() += if *p == w.a || *p == w.b { 1 } else { 2 };
-                }
+            for i in lines.on(w) {
+                let p = pts[i];
+                *degree.entry(p).or_default() += if p == w.a || p == w.b { 1 } else { 2 };
             }
         }
 
@@ -634,15 +793,34 @@ impl Schematic {
         let mut opamp = false;
         for c in &self.comps {
             let n: Vec<&str> = c.pin_pos().iter().map(|p| nets[p].as_str()).collect();
-            let v = c.value.trim();
-            let name = c.spice_name();
+            // one card per part: a line break in a value (possible in a .sws) would start another
+            let v = c.value.trim().replace(['\n', '\r'], " ");
+            let v = v.as_str();
+            let name = node_name(&c.spice_name());
             let line = match c.kind {
                 Kind::Ground | Kind::Label => continue,
-                Kind::Resistor | Kind::Capacitor | Kind::Inductor | Kind::Voltage | Kind::Current | Kind::Behavioral => {
+                Kind::Resistor
+                | Kind::Capacitor
+                | Kind::Inductor
+                | Kind::Voltage
+                | Kind::Current
+                | Kind::Behavioral => {
                     format!("{name} {} {} {v}", n[0], n[1])
                 }
-                Kind::Diode => format!("{name} {} {} {}", n[0], n[1], if v.is_empty() { "D" } else { v }),
-                Kind::Npn | Kind::Pnp | Kind::Nmos | Kind::Pmos | Kind::Nmos4 | Kind::Pmos4 | Kind::Njf | Kind::Pjf => {
+                Kind::Diode => format!(
+                    "{name} {} {} {}",
+                    n[0],
+                    n[1],
+                    if v.is_empty() { "D" } else { v }
+                ),
+                Kind::Npn
+                | Kind::Pnp
+                | Kind::Nmos
+                | Kind::Pmos
+                | Kind::Nmos4
+                | Kind::Pmos4
+                | Kind::Njf
+                | Kind::Pjf => {
                     let def = match c.kind {
                         Kind::Npn => "NPN",
                         Kind::Pnp => "PNP",
@@ -651,13 +829,19 @@ impl Schematic {
                         Kind::Pjf => "PJF",
                         _ => "PMOS",
                     };
-                    format!("{name} {} {}", n.join(" "), if v.is_empty() { def } else { v })
+                    format!(
+                        "{name} {} {}",
+                        n.join(" "),
+                        if v.is_empty() { def } else { v }
+                    )
                 }
                 Kind::OpAmp => {
                     opamp = true;
                     format!("{name} {} {} {} swiftsim_opamp {v}", n[0], n[1], n[2])
                 }
-                Kind::Vcvs | Kind::Vccs | Kind::Switch => format!("{name} {} {} {} {} {v}", n[0], n[1], n[2], n[3]),
+                Kind::Vcvs | Kind::Vccs | Kind::Switch => {
+                    format!("{name} {} {} {} {} {v}", n[0], n[1], n[2], n[3])
+                }
                 Kind::Subckt => format!("{name} {} {v}", n.join(" ")),
             };
             t.push_str(&line);
@@ -674,7 +858,12 @@ impl Schematic {
             t.push('\n');
         }
         t.push_str(".end\n");
-        Netlist { text: t, nets, degree }
+        Netlist {
+            text: t,
+            nets,
+            degree,
+            pins,
+        }
     }
 
     /// Current file format. 1: op-amp + input moved to the top.
@@ -699,7 +888,9 @@ impl Schematic {
         let n = self.netlist();
         let mut v: Vec<String> = vec![];
         for c in self.comps.iter().filter(|c| c.kind == Kind::Label) {
-            let net = &n.nets[&c.pin_pos()[0]];
+            let Some(net) = c.pin_pos().first().map(|p| &n.nets[p]) else {
+                continue;
+            };
             if net != "0" && !v.contains(net) {
                 v.push(net.clone());
             }
@@ -716,7 +907,12 @@ impl Schematic {
             .comps
             .iter()
             .filter(|c| c.kind.prefix() == p)
-            .filter_map(|c| c.name.to_ascii_uppercase().strip_prefix(p).and_then(|s| s.parse().ok()))
+            .filter_map(|c| {
+                c.name
+                    .to_ascii_uppercase()
+                    .strip_prefix(p)
+                    .and_then(|s| s.parse().ok())
+            })
             .collect();
         let mut i = 1;
         while used.contains(&i) {
@@ -731,7 +927,15 @@ mod tests {
     use super::*;
 
     fn comp(kind: Kind, name: &str, value: &str, pos: P) -> Component {
-        Component { kind, name: name.into(), value: value.into(), pos, rot: 0, mirror: false, pins: vec![] }
+        Component {
+            kind,
+            name: name.into(),
+            value: value.into(),
+            pos,
+            rot: 0,
+            mirror: false,
+            pins: vec![],
+        }
     }
 
     #[test]
@@ -746,8 +950,24 @@ mod tests {
                 comp(Kind::Ground, "", "", [4, 6]),
                 comp(Kind::Label, "", "out", [6, 2]),
             ],
-            wires: vec![Wire { a: [0, -2], b: [4, -2] }, Wire { a: [0, 2], b: [0, 6] }, Wire { a: [4, 2], b: [6, 2] }],
-            texts: vec![Text { pos: [0, 10], text: ".op".into() }],
+            wires: vec![
+                Wire {
+                    a: [0, -2],
+                    b: [4, -2],
+                },
+                Wire {
+                    a: [0, 2],
+                    b: [0, 6],
+                },
+                Wire {
+                    a: [4, 2],
+                    b: [6, 2],
+                },
+            ],
+            texts: vec![Text {
+                pos: [0, 10],
+                text: ".op".into(),
+            }],
             ..Default::default()
         };
         let n = s.netlist();
@@ -763,19 +983,38 @@ mod tests {
         // a format-0 file (no "format" field): op-amp pins were inp (-2,1), inn (-2,-1), out (2,0)
         for rot in 0..4u8 {
             for mirror in [false, true] {
-                let c = Component { rot, mirror, ..comp(Kind::OpAmp, "U1", "", [5, 7]) };
-                let old: Vec<P> = [[-2.0, 1.0], [-2.0, -1.0], [2.0, 0.0]].iter().map(|&p| c.tf(p)).map(|q| [q[0].round() as i32, q[1].round() as i32]).collect();
-                let json = format!(r#"{{"comps":[{}],"wires":[],"texts":[]}}"#, serde_json::to_string(&c).unwrap());
+                let c = Component {
+                    rot,
+                    mirror,
+                    ..comp(Kind::OpAmp, "U1", "", [5, 7])
+                };
+                let old: Vec<P> = [[-2.0, 1.0], [-2.0, -1.0], [2.0, 0.0]]
+                    .iter()
+                    .map(|&p| c.tf(p))
+                    .map(|q| [q[0].round() as i32, q[1].round() as i32])
+                    .collect();
+                let json = format!(
+                    r#"{{"comps":[{}],"wires":[],"texts":[]}}"#,
+                    serde_json::to_string(&c).unwrap()
+                );
                 let mut s: Schematic = serde_json::from_str(&json).unwrap();
                 assert_eq!(s.format, 0);
                 s.upgrade();
-                assert_eq!((s.format, s.comps[0].pin_pos()), (Schematic::FORMAT, old.clone()), "rot {rot} mirror {mirror}");
+                assert_eq!(
+                    (s.format, s.comps[0].pin_pos()),
+                    (Schematic::FORMAT, old.clone()),
+                    "rot {rot} mirror {mirror}"
+                );
                 s.upgrade(); // idempotent
                 assert_eq!(s.comps[0].pin_pos(), old);
             }
         }
         // new files say format 1 and are left alone
-        let json = serde_json::to_string(&Schematic { comps: vec![comp(Kind::OpAmp, "U1", "", [0, 0])], ..Default::default() }).unwrap();
+        let json = serde_json::to_string(&Schematic {
+            comps: vec![comp(Kind::OpAmp, "U1", "", [0, 0])],
+            ..Default::default()
+        })
+        .unwrap();
         let mut s: Schematic = serde_json::from_str(&json).unwrap();
         s.upgrade();
         assert_eq!((s.comps[0].rot, s.comps[0].mirror), (0, false));
@@ -794,7 +1033,10 @@ mod tests {
                 comp(Kind::Label, "", "C", [8, 0]),
                 comp(Kind::Label, "", "A", [0, -2]),
             ],
-            wires: vec![Wire { a: [4, 0], b: [4, 2] }],
+            wires: vec![Wire {
+                a: [4, 0],
+                b: [4, 2],
+            }],
             texts: vec![],
             ..Default::default()
         };
@@ -803,9 +1045,79 @@ mod tests {
 
     #[test]
     fn t_junction_mid_wire_connects() {
-        let s = Schematic { comps: vec![], wires: vec![Wire { a: [0, 0], b: [10, 0] }, Wire { a: [5, 0], b: [5, 5] }], texts: vec![], ..Default::default() };
+        let s = Schematic {
+            comps: vec![],
+            wires: vec![
+                Wire {
+                    a: [0, 0],
+                    b: [10, 0],
+                },
+                Wire {
+                    a: [5, 0],
+                    b: [5, 5],
+                },
+            ],
+            texts: vec![],
+            ..Default::default()
+        };
         let n = s.netlist();
         assert_eq!(n.nets[&[0, 0]], n.nets[&[5, 5]]);
         assert_eq!(n.degree[&[5, 0]], 3);
+    }
+
+    /// A subcircuit part without pins (odd `.asy`, hand-made `.sws`) used to panic the netlister
+    /// on every frame; it is a load error now and netlists without a panic.
+    #[test]
+    fn subcircuit_without_pins() {
+        let s: Schematic =
+            serde_json::from_str(include_str!("../../tests/fixtures/audit/nopin.sws")).unwrap();
+        assert!(
+            s.check()
+                .is_err_and(|e| e.contains("X1") && e.contains("no pins"))
+        );
+        assert!(s.netlist().text.contains("X1  foo"));
+        assert!(s.label_nets().is_empty() && s.name_conflicts().is_empty());
+        assert!(Schematic::default().check().is_ok());
+    }
+
+    #[test]
+    fn labels_and_values_cannot_break_cards() {
+        let s = Schematic {
+            comps: vec![
+                comp(Kind::Resistor, "R1", "1k\nV9 x 0 5", [0, 0]),
+                comp(Kind::Label, "", "my  net", [0, -2]),
+                comp(Kind::Ground, "", "", [0, 2]),
+            ],
+            ..Default::default()
+        };
+        let n = s.netlist();
+        assert!(n.text.contains("R1 my_net 0 1k V9 x 0 5\n"), "{}", n.text);
+        assert!(!n.text.lines().any(|l| l.starts_with("V9")));
+        assert_eq!(s.label_nets(), ["my_net"]);
+        assert!(
+            s.name_conflicts()
+                .iter()
+                .any(|w| w.contains("my  net") && w.contains("my_net"))
+        );
+    }
+
+    #[test]
+    fn diagonal_wires_still_connect() {
+        let s = Schematic {
+            wires: vec![
+                Wire {
+                    a: [0, 0],
+                    b: [4, 4],
+                },
+                Wire {
+                    a: [2, 2],
+                    b: [2, 9],
+                },
+            ],
+            ..Default::default()
+        };
+        let n = s.netlist();
+        assert_eq!(n.nets[&[0, 0]], n.nets[&[2, 9]]);
+        assert_eq!(n.degree[&[2, 2]], 3);
     }
 }

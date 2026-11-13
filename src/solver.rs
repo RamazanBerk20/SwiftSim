@@ -39,14 +39,20 @@ impl Sub for C64 {
 impl Mul for C64 {
     type Output = C64;
     fn mul(self, o: C64) -> C64 {
-        C64::new(self.re * o.re - self.im * o.im, self.re * o.im + self.im * o.re)
+        C64::new(
+            self.re * o.re - self.im * o.im,
+            self.re * o.im + self.im * o.re,
+        )
     }
 }
 impl Div for C64 {
     type Output = C64;
     fn div(self, o: C64) -> C64 {
         let d = o.re * o.re + o.im * o.im;
-        C64::new((self.re * o.re + self.im * o.im) / d, (self.im * o.re - self.re * o.im) / d)
+        C64::new(
+            (self.re * o.re + self.im * o.im) / d,
+            (self.im * o.re - self.re * o.im) / d,
+        )
     }
 }
 impl Neg for C64 {
@@ -137,7 +143,7 @@ const PEND: usize = 32;
 pub struct Matrix<T> {
     pub n: usize,
     b: Vec<T>,
-    a: Vec<T>, // n <= DENSE_IDX: dense row-major values
+    a: Vec<T>,      // n <= DENSE_IDX: dense row-major values
     nz: Vec<usize>, // dense LU scratch
     // table mode (DENSE_MAX < n <= DENSE_IDX): 0 = unseen, 1 = registered, 2 = new
     known: Vec<u8>,
@@ -160,7 +166,7 @@ struct Sparse<T> {
     pos: usize,
     ordered: bool,
     pivoted: bool,
-    tol: f64, // diagonal-preference threshold for the current order
+    tol: f64,       // diagonal-preference threshold for the current order
     q: Vec<u32>,    // step -> column
     pinv: Vec<u32>, // row -> step
     // A grouped by step column as (value slot, row step); L (unit diag) and U by step column
@@ -182,7 +188,11 @@ impl<T: Scalar> Matrix<T> {
         Matrix {
             n,
             b: vec![T::default(); n],
-            a: if n <= DENSE_IDX { vec![T::default(); n * n] } else { Vec::new() },
+            a: if n <= DENSE_IDX {
+                vec![T::default(); n * n]
+            } else {
+                Vec::new()
+            },
             nz: Vec::new(),
             known: if table { vec![0; n * n] } else { Vec::new() },
             pend: [0; PEND],
@@ -401,7 +411,11 @@ impl<T: Scalar> Sparse<T> {
             ui: Vec::new(),
             ux: Vec::new(),
             ud: Vec::new(),
-            w: if n > DENSE_MAX { vec![T::default(); n] } else { Vec::new() },
+            w: if n > DENSE_MAX {
+                vec![T::default(); n]
+            } else {
+                Vec::new()
+            },
         }
     }
     /// Large-n stamp through the stamp-order cache.
@@ -452,13 +466,28 @@ impl<T: Scalar> Sparse<T> {
             self.pivoted = false;
             self.tol = PIVOT_TOL;
         }
-        if !(self.pivoted && self.refactor(ext)) && self.factor(ext, self.tol)? > GROWTH_MAX && self.tol < 1.0 {
+        if !(self.pivoted && self.refactor(ext))
+            && self.factor(ext, self.tol)? > GROWTH_MAX
+            && self.tol < 1.0
+        {
             // chains of gain stages (e.g. a ring oscillator at DC) compound the growth
             // that threshold pivoting allows: fall back to strict partial pivoting
             self.tol = 1.0;
             self.factor(ext, 1.0)?;
         }
-        let Sparse { q, pinv, lp, li, lx, up, ui, ux, ud, w, .. } = self;
+        let Sparse {
+            q,
+            pinv,
+            lp,
+            li,
+            lx,
+            up,
+            ui,
+            ux,
+            ud,
+            w,
+            ..
+        } = self;
         for (&p, &v) in pinv.iter().zip(b.iter()) {
             w[p as usize] = v;
         }
@@ -549,7 +578,24 @@ impl<T: Scalar> Sparse<T> {
             ce[next[c as usize]] = e as u32;
             next[c as usize] += 1;
         }
-        let Sparse { ent, slot, val, q, pinv, ap, ae, lp, li, lx, up, ui, ux, ud, w: x, .. } = self;
+        let Sparse {
+            ent,
+            slot,
+            val,
+            q,
+            pinv,
+            ap,
+            ae,
+            lp,
+            li,
+            lx,
+            up,
+            ui,
+            ux,
+            ud,
+            w: x,
+            ..
+        } = self;
         let val: &[T] = if ext.is_empty() { val } else { ext };
         pinv.clear();
         pinv.resize(n, NONE);
@@ -577,13 +623,23 @@ impl<T: Scalar> Sparse<T> {
                     continue;
                 }
                 mark[r as usize] = k;
-                let start = |i: u32| if pinv[i as usize] == NONE { 0 } else { lp[pinv[i as usize] as usize] };
+                let start = |i: u32| {
+                    if pinv[i as usize] == NONE {
+                        0
+                    } else {
+                        lp[pinv[i as usize] as usize]
+                    }
+                };
                 stack[0] = r;
                 pstack[0] = start(r);
                 let mut head = 1;
                 while head > 0 {
                     let j = stack[head - 1];
-                    let end = if pinv[j as usize] == NONE { 0 } else { lp[pinv[j as usize] as usize + 1] };
+                    let end = if pinv[j as usize] == NONE {
+                        0
+                    } else {
+                        lp[pinv[j as usize] as usize + 1]
+                    };
                     let mut p = pstack[head - 1];
                     while p < end && mark[li[p] as usize] == k {
                         p += 1;
@@ -631,7 +687,11 @@ impl<T: Scalar> Sparse<T> {
             if piv == usize::MAX || !(x[piv].mag() > 1e-300) || !x[piv].finite() {
                 x.fill(T::default());
                 // overflow under threshold pivoting is growth, not singularity
-                return if tol < 1.0 && !umax.is_finite() { Ok(f64::INFINITY) } else { Err(col + 1) };
+                return if tol < 1.0 && !umax.is_finite() {
+                    Ok(f64::INFINITY)
+                } else {
+                    Err(col + 1)
+                };
             }
             let pv = x[piv];
             pinv[piv] = k as u32;
@@ -666,7 +726,21 @@ impl<T: Scalar> Sparse<T> {
     /// Numeric LU on the fixed pattern and pivots; false if a pivot got too small
     /// or the growth too large.
     fn refactor(&mut self, ext: &[T]) -> bool {
-        let Sparse { n, val, ap, ae, lp, li, lx, up, ui, ux, ud, w: x, .. } = self;
+        let Sparse {
+            n,
+            val,
+            ap,
+            ae,
+            lp,
+            li,
+            lx,
+            up,
+            ui,
+            ux,
+            ud,
+            w: x,
+            ..
+        } = self;
         let val: &[T] = if ext.is_empty() { val } else { ext };
         // plain `>` maxima: f64::max's NaN handling is measurably slower in these loops
         let (mut amax, mut umax, mut lmax) = (0.0f64, 0.0f64, 0.0f64);
@@ -772,7 +846,11 @@ mod tests {
                 for &(i, j, v) in &a {
                     b[i] -= v * x[j];
                 }
-                assert!(b[1..].iter().all(|r| r.abs() < 1e-12), "n={n} it={it}: {:?}", &b[1..]);
+                assert!(
+                    b[1..].iter().all(|r| r.abs() < 1e-12),
+                    "n={n} it={it}: {:?}",
+                    &b[1..]
+                );
             }
         }
     }
@@ -789,7 +867,11 @@ mod tests {
                     a.push((i, i + 3, C64::new(2e-4, 0.0)));
                 }
             }
-            a.extend([(1, n, C64::from(1.0)), (n, 1, C64::from(1.0)), (n - 1, n - 1, C64::from(1e-3))]);
+            a.extend([
+                (1, n, C64::from(1.0)),
+                (n, 1, C64::from(1.0)),
+                (n - 1, n - 1, C64::from(1e-3)),
+            ]);
             let (mut m, mut t) = (Matrix::<C64>::new(n), Matrix::<C64>::new(n));
             for _ in 0..2 {
                 m.clear();
