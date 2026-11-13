@@ -611,7 +611,7 @@ mod tests {
         );
         assert_eq!(
             gui_status(&json!({"pid": 1}), &ctl, windows)["windows"][0]["document"]["path"],
-            "/b.sws"
+            json!(std::path::absolute("/b.sws").unwrap())
         );
         let r = gui_status(
             &json!({"file": "/b.sws", "wait_for": ["finished"], "after_run": 1, "timeout": 0.3}),
