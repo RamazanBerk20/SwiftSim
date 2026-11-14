@@ -120,8 +120,18 @@ Rust 1.89+ (edition 2024; `File::try_lock`). The release profile uses thin LTO.
 The maintainer may be running SwiftSim on the same machine. Never `pkill swiftsim` by name;
 start your instance with `& PID=$!` and kill that PID. Point test runs at a scratch config
 (`XDG_CONFIG_HOME=/some/tmp/dir`) so you don't write the user's recent files, settings or
-recovery copies in `~/.config/swiftsim`. On KDE Wayland, run the app under XWayland
-(`env -u WAYLAND_DISPLAY`) to drive it with `xdotool` and capture with `spectacle -b -n -a -o`.
+recovery copies in `~/.config/swiftsim`.
+
+Never open windows, send input or take screenshots on the maintainer's desktop. Run the GUI in a
+private headless KWin instead: `dbus-run-session -- kwin_wayland --virtual --xwayland --socket wl`
+with its own `XDG_RUNTIME_DIR`, `HOME` and `XDG_CONFIG_HOME`, and give the app only that session's
+`WAYLAND_DISPLAY`, `DISPLAY` and `DBUS_SESSION_BUS_ADDRESS` (check they are not `wayland-0/1`,
+`:0/:1` or `/run/user/<uid>/bus`). Open and run circuits through the MCP tools (`open_in_gui`,
+`gui_run`); for pointer input start the window on the nested Xwayland (no `WAYLAND_DISPLAY`) and use
+`xdotool` with the nested `DISPLAY` (`XwaylandEisNoPrompt=true` under `[Xwayland]` in the nested
+`kwinrc` skips KWin's permission prompt). Capture with `spectacle -b -n -f -o` run in the nested
+session (`KWIN_SCREENSHOT_NO_PERMISSION_CHECKS=1` in KWin's environment).
+`scripts/screenshots.sh` does all of this and regenerates `docs/transient.png` and `docs/ac.png`.
 
 ## Git and privacy
 
