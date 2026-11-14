@@ -25,6 +25,6 @@ pkgbase = swiftsim
 	options = !lto
 	options = !debug
 	source = swiftsim-0.4.0.tar.gz::https://github.com/RamazanBerk20/SwiftSim/archive/refs/tags/v0.4.0.tar.gz
-	sha256sums = d8bfd831570e7d05a487357198da3149d6bb75bf8b695320241e679598d7fa84
+	sha256sums = a555b648aa642ff743d004c505f9bf77d901912ad94c54f6aff460f7c14bc790
 
 pkgname = swiftsim
