@@ -289,7 +289,7 @@ cargo test --release
 
 ## Accuracy against ngspice
 
-`tests/reference/` has 39 netlists (RC/RLC filters, rectifiers, BJT/MOSFET/JFET/VDMOS stages
+`tests/reference/` has 40 netlists (RC/RLC filters, rectifiers, BJT/MOSFET/JFET/VDMOS stages
 and switches, CMOS logic, TI op-amp circuits, oscillators, `.dc` sweeps, `.step`, temperature,
 `.noise` of resistors, diode, BJT, MOSFET for each `NLEV`, JFET and VDMOS)
 and a script that runs each one in ngspice and in SwiftSim and compares every node voltage
