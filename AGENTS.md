@@ -143,7 +143,7 @@ the `Co-Authored-By:` line your harness asks for. Commit or push only when the m
 
 1. Make sure `master` is pushed and CI (`.github/workflows/ci.yml`, Linux + Windows) is green.
 2. Tag the CI-green commit: `git tag -a vX.Y.Z -m "SwiftSim X.Y.Z"` and push the tag. A tag with
-   a hyphen (`v0.3.0-rc1`) becomes a pre-release.
+   a hyphen (`v0.4.0-rc1`) becomes a pre-release.
 3. `release.yml` builds the Windows installer + zip and the Linux AppImage + tarball, stamps the
    tag into the binary (`SWIFTSIM_VERSION`) and publishes the GitHub Release.
 4. Bump `version` in `Cargo.toml` when the release number changes.
