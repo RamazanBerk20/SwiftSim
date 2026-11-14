@@ -24,6 +24,8 @@ serde_json = "1.0.154"
 sys-locale = "0.3.2"
 unicode-bidi = "0.3"
 unicode-segmentation = "1"
+# already built by eframe; only for the compositor's window menu (`Window::show_window_menu`)
+winit = { version = "0.30", default-features = false }
 ureq = { version = "3.5.1", default-features = false, features = ["rustls"] }
 
 [target."cfg(windows)".build-dependencies]

@@ -256,5 +256,7 @@
 "Write these values into the schematic's .param lines (undoable)": "Bu değerleri şemanın .param satırlarına yaz (geri alınabilir)",
 "Reset": "Sıfırla",
 "Back to the schematic's values": "Şemadaki değerlere geri dön",
-"Parameter values written to the schematic (Ctrl+Z undoes it).": "Parametre değerleri şemaya yazıldı (Ctrl+Z geri alır)."
+"Parameter values written to the schematic (Ctrl+Z undoes it).": "Parametre değerleri şemaya yazıldı (Ctrl+Z geri alır).",
+"Minimize": "Simge durumuna küçült",
+"Maximize": "Ekranı kapla"
 }

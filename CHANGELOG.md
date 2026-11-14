@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- The window draws its own title bar: the menus, the document name (● when unsaved) with a
+  small lamp while a simulation runs, stops or has failed, and the window buttons share one
+  row where the system title bar and the menu bar used to be. Drag it to move the window,
+  double-click to maximize, right-click for the compositor's window menu (Wayland, Windows);
+  resize from any edge or corner.
+
+### Fixed
+- The Properties panel's scroll bar no longer covers the ends of its text.
+
 ## 0.3.0
 
 ### Added

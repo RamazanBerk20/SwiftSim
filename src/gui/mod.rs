@@ -8,6 +8,7 @@ mod i18n;
 mod schematic;
 mod session;
 mod state;
+mod titlebar;
 pub mod update;
 mod waveform;
 
@@ -42,7 +43,9 @@ pub fn run(file: Option<String>) -> eframe::Result {
             .with_min_inner_size([900.0, 600.0])
             .with_title("SwiftSim")
             .with_app_id("swiftsim")
-            .with_icon(icon),
+            .with_icon(icon)
+            // `titlebar` draws the bar, the window buttons and the resize edges
+            .with_decorations(false),
         // window geometry, panel sizes and `Settings`
         persistence_path: Some(config_dir().join("settings.ron")),
         // replaced by `fonts::Fallback`, which also has fonts of its own
@@ -154,6 +157,10 @@ struct App {
     /// update replaced (`update::cleanup`). `None` once done, or after an install in this window
     /// (whose replaced program must wait for the new version to run).
     cleanup_at: Option<Instant>,
+    /// A left press on a window edge, taken out of the input by `raw_input_hook`.
+    resize: Option<egui::ResizeDirection>,
+    /// Where the title bar asked for the compositor's window menu.
+    window_menu: Option<egui::Pos2>,
 }
 
 /// How long the window shows "Driven by an agent" after an agent's last request.
@@ -218,6 +225,8 @@ impl App {
             agent_seen: None,
             // past "Restart now"'s watch, so a crash while it watches can still be rolled back
             cleanup_at: Some(Instant::now() + 2 * RESTART_GRACE),
+            resize: None,
+            window_menu: None,
         };
         match session::ipc_dir(&config_dir()) {
             Ok(dir) => {
@@ -952,9 +961,11 @@ impl App {
         }
     }
 
-    fn menu(&mut self, ui: &mut egui::Ui) {
+    /// The menus; returns the rect they cover in the title bar.
+    fn menu(&mut self, ui: &mut egui::Ui) -> egui::Rect {
         let ctx = ui.ctx().clone();
-        egui::MenuBar::new().ui(ui, |ui| i18n::bar(ui, |ui| {
+        // the menu bar takes the whole width; the scope measures the menus alone
+        egui::MenuBar::new().ui(ui, |ui| i18n::bar(ui, |ui| ui.scope(|ui| {
             i18n::menu(ui, tr("File"), |ui| {
                 if item(ui, tr("New schematic"), "Ctrl+N").clicked() {
                     self.request(Pending::New, &ctx);
@@ -1170,7 +1181,7 @@ impl App {
                     ui.close();
                 }
             });
-        }));
+        }).response.rect)).inner
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -1692,13 +1703,22 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.resize = titlebar::input(ctx, raw).or(self.resize);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // a GUI panic still leaves an up-to-date recovery copy for the next start
         if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.frame(ui))) {
             if self.dirty() {
                 self.autosave();
             }
             std::panic::resume_unwind(p);
+        }
+        if let (Some(p), Some(w)) = (self.window_menu.take(), frame.winit_window()) {
+            // Wayland and Windows; X11 has no such request
+            let px = p.to_vec2() * ui.ctx().pixels_per_point();
+            w.show_window_menu(winit::dpi::PhysicalPosition::new(px.x as f64, px.y as f64));
         }
     }
 
@@ -2050,6 +2070,9 @@ impl App {
 
     fn frame(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if let Some(d) = self.resize.take() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(d));
+        }
         self.poll(&ctx);
         if self.doc.mode == Mode::Schematic {
             let v = self.ed.version();
@@ -2125,14 +2148,31 @@ impl App {
             .as_ref()
             .and_then(|p| p.file_name())
             .map_or(tr("untitled").into(), |n| n.to_string_lossy().to_string());
-        let title = format!("{}{name} — SwiftSim", if self.dirty() { "● " } else { "" });
+        let dirty = if self.dirty() { "● " } else { "" };
+        let title = format!("{dirty}{name} — SwiftSim");
         if title != self.title {
+            // still the name in the taskbar and the window switcher
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.title = title;
         }
 
+        egui::Panel::top("titlebar")
+            .exact_size(titlebar::HEIGHT)
+            .frame(egui::Frame::NONE.fill(titlebar::fill(self.dark)))
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                let lamp = titlebar::Lamp::of(&self.sim).map(|l| {
+                    let tip = match &self.sim {
+                        Sim::Failed { msg, .. } => trf("Simulation failed: {}", &[msg]),
+                        Sim::Cancelling { .. } => tr("Stopping…").into(),
+                        _ => tr("Simulating…").into(),
+                    };
+                    (l, tip)
+                });
+                let shown = format!("{dirty}{}", bidi::display(&name, bidi::Base::Auto));
+                self.window_menu = titlebar::show(ui, &shown, lamp, |ui| self.menu(ui));
+            });
         egui::Panel::top("menu").show(ui, |ui| {
-            self.menu(ui);
             i18n::mirrored(ui, |ui| {
                 self.toolbar(ui);
                 self.update_banner(ui);
@@ -2181,6 +2221,8 @@ impl App {
                 .default_size(280.0)
                 .min_size(220.0)
                 .show(ui, |ui| {
+                    // a floating scroll bar would cover the ends of the wrapped lines
+                    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                     egui::ScrollArea::vertical()
                         .show(ui, |ui| i18n::mirrored(ui, |ui| self.properties(ui)));
                 });
@@ -2204,6 +2246,7 @@ impl App {
             });
 
         self.modal(&ctx);
+        titlebar::edge_cursor(&ctx);
         let next = self.window.update(&self.status_json());
         ctx.request_repaint_after(next);
     }

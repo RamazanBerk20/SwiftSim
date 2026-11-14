@@ -256,5 +256,7 @@
 "Write these values into the schematic's .param lines (undoable)": "Записать эти значения в строки .param схемы (можно отменить)",
 "Reset": "Сбросить",
 "Back to the schematic's values": "Вернуть значения из схемы",
-"Parameter values written to the schematic (Ctrl+Z undoes it).": "Значения параметров записаны в схему (Ctrl+Z отменяет)."
+"Parameter values written to the schematic (Ctrl+Z undoes it).": "Значения параметров записаны в схему (Ctrl+Z отменяет).",
+"Minimize": "Свернуть",
+"Maximize": "Развернуть"
 }

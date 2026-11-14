@@ -256,5 +256,7 @@
 "Write these values into the schematic's .param lines (undoable)": "Diese Werte in die .param-Zeilen der Schaltung schreiben (rückgängig machbar)",
 "Reset": "Zurücksetzen",
 "Back to the schematic's values": "Zurück zu den Werten der Schaltung",
-"Parameter values written to the schematic (Ctrl+Z undoes it).": "Parameterwerte in die Schaltung geschrieben (Strg+Z macht es rückgängig)."
+"Parameter values written to the schematic (Ctrl+Z undoes it).": "Parameterwerte in die Schaltung geschrieben (Strg+Z macht es rückgängig).",
+"Minimize": "Minimieren",
+"Maximize": "Maximieren"
 }

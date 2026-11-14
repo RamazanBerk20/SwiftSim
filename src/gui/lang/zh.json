@@ -256,5 +256,7 @@
 "Write these values into the schematic's .param lines (undoable)": "将这些值写入原理图的 .param 行（可撤销）",
 "Reset": "重置",
 "Back to the schematic's values": "恢复原理图中的值",
-"Parameter values written to the schematic (Ctrl+Z undoes it).": "参数值已写入原理图（Ctrl+Z 可撤销）。"
+"Parameter values written to the schematic (Ctrl+Z undoes it).": "参数值已写入原理图（Ctrl+Z 可撤销）。",
+"Minimize": "最小化",
+"Maximize": "最大化"
 }

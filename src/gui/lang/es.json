@@ -256,5 +256,7 @@
 "Write these values into the schematic's .param lines (undoable)": "Escribir estos valores en las líneas .param del esquema (se puede deshacer)",
 "Reset": "Restablecer",
 "Back to the schematic's values": "Volver a los valores del esquema",
-"Parameter values written to the schematic (Ctrl+Z undoes it).": "Valores de parámetros escritos en el esquema (Ctrl+Z lo deshace)."
+"Parameter values written to the schematic (Ctrl+Z undoes it).": "Valores de parámetros escritos en el esquema (Ctrl+Z lo deshace).",
+"Minimize": "Minimizar",
+"Maximize": "Maximizar"
 }

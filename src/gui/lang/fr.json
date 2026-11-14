@@ -256,5 +256,7 @@
 "Write these values into the schematic's .param lines (undoable)": "Écrire ces valeurs dans les lignes .param du schéma (annulable)",
 "Reset": "Réinitialiser",
 "Back to the schematic's values": "Revenir aux valeurs du schéma",
-"Parameter values written to the schematic (Ctrl+Z undoes it).": "Valeurs des paramètres écrites dans le schéma (Ctrl+Z annule)."
+"Parameter values written to the schematic (Ctrl+Z undoes it).": "Valeurs des paramètres écrites dans le schéma (Ctrl+Z annule).",
+"Minimize": "Réduire",
+"Maximize": "Agrandir"
 }

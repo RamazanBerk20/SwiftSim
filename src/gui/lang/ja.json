@@ -256,5 +256,7 @@
 "Write these values into the schematic's .param lines (undoable)": "これらの値を回路図の .param 行に書き込む (元に戻せます)",
 "Reset": "リセット",
 "Back to the schematic's values": "回路図の値に戻す",
-"Parameter values written to the schematic (Ctrl+Z undoes it).": "パラメータ値を回路図に書き込みました (Ctrl+Z で元に戻せます)。"
+"Parameter values written to the schematic (Ctrl+Z undoes it).": "パラメータ値を回路図に書き込みました (Ctrl+Z で元に戻せます)。",
+"Minimize": "最小化",
+"Maximize": "最大化"
 }

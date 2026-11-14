@@ -3236,6 +3236,7 @@ dependencies = [
  "unicode-bidi",
  "unicode-segmentation",
  "ureq",
+ "winit",
  "winresource",
 ]
 

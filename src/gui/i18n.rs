@@ -198,7 +198,12 @@ mod tests {
             }
         }
         // every literal passed to tr()/trf() in the sources has a translation
-        let sources = [include_str!("mod.rs"), include_str!("waveform.rs")].concat();
+        let sources = [
+            include_str!("mod.rs"),
+            include_str!("waveform.rs"),
+            include_str!("titlebar.rs"),
+        ]
+        .concat();
         for (i, _) in sources.match_indices("(\"") {
             let function = sources[..i]
                 .rsplit(|c: char| !c.is_alphanumeric() && c != '_')

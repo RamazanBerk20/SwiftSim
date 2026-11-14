@@ -256,5 +256,7 @@
 "Write these values into the schematic's .param lines (undoable)": "이 값을 회로도의 .param 줄에 쓰기 (실행 취소 가능)",
 "Reset": "재설정",
 "Back to the schematic's values": "회로도의 값으로 되돌리기",
-"Parameter values written to the schematic (Ctrl+Z undoes it).": "파라미터 값을 회로도에 썼습니다 (Ctrl+Z로 실행 취소)."
+"Parameter values written to the schematic (Ctrl+Z undoes it).": "파라미터 값을 회로도에 썼습니다 (Ctrl+Z로 실행 취소).",
+"Minimize": "최소화",
+"Maximize": "최대화"
 }
